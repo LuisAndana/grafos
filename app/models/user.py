@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
-from sqlalchemy import Column, String, DateTime, Boolean, BigInteger
+from sqlalchemy import Column, BigInteger, String, SmallInteger, DateTime
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
 
@@ -7,10 +7,15 @@ from app.core.database import Base
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(BigInteger, primary_key=True, index=True)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    username = Column(String(100), unique=True, index=True, nullable=False)
+    id              = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    email           = Column(String(255), unique=True, nullable=False, index=True)
+    username        = Column(String(100), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_login = Column(DateTime, nullable=True)
+    is_active       = Column(SmallInteger, default=1)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    last_login      = Column(DateTime, nullable=True)
+
+    # Relaciones
+    proyectos      = relationship("Proyecto", back_populates="user")
+    historial      = relationship("Historial", back_populates="user")
+    srs_documentos = relationship("SrsDocumento", back_populates="generado_by")
