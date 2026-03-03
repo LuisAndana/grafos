@@ -7,6 +7,9 @@ from app.services.auth import AuthService
 from app.core.security import verify_token
 from app.core.dependencies import get_current_user
 from app.models.user import User
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
@@ -37,7 +40,8 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error en login: {type(e).__name__}: {e}", exc_info=True)  #  agrega esto
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al iniciar sesion")
 
 @router.post("/refresh", response_model=TokenResponse)

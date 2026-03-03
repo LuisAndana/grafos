@@ -32,4 +32,4 @@ class Proyecto(Base):
     elicitacion_procesos       = relationship("ElicitacionProceso", back_populates="proyecto")
     elicitacion_necesidades    = relationship("ElicitacionNecesidad", back_populates="proyecto")
     negociaciones              = relationship("Negociacion", back_populates="proyecto")
-    srs_documentos             = relationship("SrsDocumento", back_populates="proyecto")onship("Observacion", back_populates="proyecto")
+    srs_documentos             = relationship("SrsDocumento", back_populates="proyecto")
