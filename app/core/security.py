@@ -28,7 +28,7 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
             minutes=settings.access_token_expire_minutes
         )
 
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "type": "access"})  # ← FIX: agregado "type": "access"
     encoded_jwt = jwt.encode(
         to_encode,
         settings.secret_key,
