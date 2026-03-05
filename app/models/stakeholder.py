@@ -1,23 +1,12 @@
 from sqlalchemy import Column, BigInteger, String, Text, DateTime, Enum, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
-import enum
 from app.core.database import Base
 
 
-class TipoStakeholder(str, enum.Enum):
-    interno   = "Interno"
-    externo   = "Externo"
-    regulador = "Regulador"
-    proveedor = "Proveedor"
-    otro      = "Otro"
-
-
-class NivelInfluencia(str, enum.Enum):
-    alto  = "Alto"
-    medio = "Medio"
-    bajo  = "Bajo"
-
+# Los valores DEBEN coincidir EXACTAMENTE con lo que MySQL tiene en el ENUM
+# MySQL tiene: 'Interno','Externo','Regulador','Proveedor','Otro'
+# Por eso usamos Enum de SQLAlchemy directamente con strings, NO con Python enum
 
 class Stakeholder(Base):
     __tablename__ = "stakeholders"
@@ -26,9 +15,16 @@ class Stakeholder(Base):
     proyecto_id      = Column(BigInteger, ForeignKey("proyectos.id_proyecto"), nullable=True)
     nombre           = Column(String(150), nullable=False)
     rol              = Column(String(150), nullable=False)
-    tipo             = Column(Enum(TipoStakeholder), nullable=False)
+    tipo             = Column(
+        Enum('Interno', 'Externo', 'Regulador', 'Proveedor', 'Otro', name='tipostakeholder'),
+        nullable=False
+    )
     area             = Column(String(100), nullable=False)
-    nivel_influencia = Column(Enum(NivelInfluencia), nullable=False, default=NivelInfluencia.medio)
+    nivel_influencia = Column(
+        Enum('Alto', 'Medio', 'Bajo', name='nivelinfluencia'),
+        nullable=False,
+        default='Medio'
+    )
     interes_sistema  = Column(Text, nullable=False)
     created_at       = Column(DateTime, default=datetime.utcnow)
     updated_at       = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
