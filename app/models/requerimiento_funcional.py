@@ -1,3 +1,4 @@
+# app/models/requerimiento_funcional.py
 from sqlalchemy import Column, BigInteger, String, Text, DateTime, Enum, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -22,11 +23,23 @@ class RequerimientoFuncional(Base):
 
     id_req      = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
     proyecto_id = Column(BigInteger, ForeignKey("proyectos.id_proyecto"), nullable=True)
-    codigo      = Column(String(20), nullable=False)       # RF-001, RF-002...
+    codigo      = Column(String(20), nullable=False)
     descripcion = Column(Text, nullable=False)
     actor       = Column(String(150), nullable=True)
-    prioridad   = Column(Enum(PrioridadReqFunc), nullable=False, default=PrioridadReqFunc.media)
-    estado      = Column(Enum(EstadoReqFunc), nullable=False, default=EstadoReqFunc.borrador)
+
+    # values_callable hace que SQLAlchemy use el .value ("Alta", "En progreso")
+    # en lugar de la clave del enum ("alta", "en_progreso")
+    prioridad = Column(
+        Enum(PrioridadReqFunc, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=PrioridadReqFunc.media,
+    )
+    estado = Column(
+        Enum(EstadoReqFunc, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=EstadoReqFunc.borrador,
+    )
+
     created_at  = Column(DateTime, default=datetime.utcnow)
     updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
