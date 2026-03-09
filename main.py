@@ -19,14 +19,12 @@ from app.models.stakeholder import Stakeholder
 from app.models.tipo_usuario_sistema import TipoUsuarioSistema
 from app.models.usuario_sistema import UsuarioSistema
 from app.models.validacion import Validacion
-from app.models.requerimiento_funcional import RequerimientoFuncional
 
 # Routers
 from app.routes.auth import router
 from app.routes.proyecto_router import router as proyecto_router
 from app.routes.stakeholder_router import router as stakeholder_router
-from app.routes.elicitacion_router import router as elicitacion_router
-from app.routes.requerimiento_funcional_router import router as rf_router
+from app.routes.elicitacion_router import router as elicitacion_router   # ← NUEVO
 
 settings = get_settings()
 
@@ -45,8 +43,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(proyecto_router)
 app.include_router(stakeholder_router)
-app.include_router(elicitacion_router)
-app.include_router(rf_router)
+app.include_router(elicitacion_router)   # ← NUEVO
 
 
 def custom_openapi():
