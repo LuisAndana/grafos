@@ -53,12 +53,6 @@ class FocusGroup(Base):
     created_at       = Column(DateTime, default=datetime.utcnow)
     updated_at       = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relaciones
-    proyecto       = relationship("Proyecto", back_populates="focus_groups")
-    participantes  = relationship("FgParticipante",  back_populates="focus_group", cascade="all, delete-orphan")
-    objetivos      = relationship("FgObjetivo",      back_populates="focus_group", cascade="all, delete-orphan")
-    requerimientos = relationship("FgRequerimiento", back_populates="focus_group", cascade="all, delete-orphan")
-
 
 class FgParticipante(Base):
     __tablename__ = "fg_participantes"
@@ -71,8 +65,7 @@ class FgParticipante(Base):
     email              = Column(String(200), nullable=False)
     nivel_influencia   = Column(Enum(NivelInfluenciaFG), nullable=False, default=NivelInfluenciaFG.medio)
 
-    # Relación
-    focus_group = relationship("FocusGroup", back_populates="participantes")
+
 
 
 class FgObjetivo(Base):
@@ -83,8 +76,7 @@ class FgObjetivo(Base):
     descripcion    = Column(Text, nullable=False)
     es_principal   = Column(SmallInteger, nullable=False, default=0)  # 0 = No, 1 = Sí
 
-    # Relación
-    focus_group = relationship("FocusGroup", back_populates="objetivos")
+
 
 
 class FgRequerimiento(Base):
@@ -96,6 +88,3 @@ class FgRequerimiento(Base):
     descripcion         = Column(Text, nullable=False)
     prioridad           = Column(Enum(PrioridadReq), nullable=False, default=PrioridadReq.medio)
     categoria           = Column(Enum(CategoriaReq), nullable=False, default=CategoriaReq.funcional)
-
-    # Relación
-    focus_group = relationship("FocusGroup", back_populates="requerimientos")

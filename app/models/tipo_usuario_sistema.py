@@ -13,5 +13,3 @@ class TipoUsuarioSistema(Base):
     activo      = Column(SmallInteger, nullable=False, default=1)  # 1=Activo, 0=Inactivo
     created_at  = Column(DateTime, default=datetime.utcnow)
 
-    # Relación inversa
-    usuarios = relationship("UsuarioSistema", back_populates="tipo")

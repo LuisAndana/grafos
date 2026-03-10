@@ -5,15 +5,27 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import verify_token
 from app.models.user import User
+import logging
 
-bearer_scheme = HTTPBearer(auto_error=True)
+logger = logging.getLogger(__name__)
+
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials=Depends(bearer_scheme),
-    db: Session = Depends(get_db),
+        credentials=Depends(bearer_scheme),
+        db: Session = Depends(get_db),
 ) -> User:
+    # Validar que las credenciales existan
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No se proporcionó token de autenticación",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     token = credentials.credentials
+    logger.debug(f"Token recibido: {token[:20]}...")  # Log solo los primeros 20 caracteres
 
     payload = verify_token(token)
     if payload is None:
