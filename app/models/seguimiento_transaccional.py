@@ -20,10 +20,6 @@ class SeguimientoTransaccional(Base):
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relaciones
-    proyecto = relationship("Proyecto", back_populates="seguimientos_transaccional")
-    pasos    = relationship("SegTransPaso", back_populates="seguimiento", cascade="all, delete-orphan")
-
 
 class SegTransPaso(Base):
     __tablename__ = "seg_trans_pasos"
@@ -34,5 +30,3 @@ class SegTransPaso(Base):
     descripcion    = Column(String(500), nullable=False)         # ¿Qué hace el usuario?
     observaciones  = Column(Text, nullable=True)                 # Notas, comportamientos, tiempo...
 
-    # Relación
-    seguimiento = relationship("SeguimientoTransaccional", back_populates="pasos")

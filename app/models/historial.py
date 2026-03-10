@@ -15,6 +15,4 @@ class Historial(Base):
     descripcion  = Column(Text, nullable=True)
     fecha        = Column(DateTime, default=datetime.utcnow)
 
-    # Relaciones
-    user     = relationship("User", back_populates="historial")
-    proyecto = relationship("Proyecto", back_populates="historial")
+

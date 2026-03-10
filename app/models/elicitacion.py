@@ -14,8 +14,7 @@ class ElicitacionEntrevista(Base):
     created_at    = Column(DateTime, default=datetime.utcnow)
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relación
-    proyecto = relationship("Proyecto", back_populates="elicitacion_entrevistas")
+
 
 
 class ElicitacionProceso(Base):
@@ -29,8 +28,7 @@ class ElicitacionProceso(Base):
     created_at           = Column(DateTime, default=datetime.utcnow)
     updated_at           = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relación
-    proyecto = relationship("Proyecto", back_populates="elicitacion_procesos")
+
 
 
 class ElicitacionNecesidad(Base):
@@ -43,5 +41,3 @@ class ElicitacionNecesidad(Base):
     seleccionada   = Column(SmallInteger, nullable=False, default=0)  # si está marcada
     created_at     = Column(DateTime, default=datetime.utcnow)
 
-    # Relación
-    proyecto = relationship("Proyecto", back_populates="elicitacion_necesidades")

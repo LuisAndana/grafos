@@ -16,6 +16,3 @@ class UsuarioSistema(Base):
     created_at            = Column(DateTime, default=datetime.utcnow)
     updated_at            = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relaciones
-    proyecto = relationship("Proyecto", back_populates="usuarios_sistema")
-    tipo     = relationship("TipoUsuarioSistema", back_populates="usuarios")

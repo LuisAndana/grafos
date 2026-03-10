@@ -27,9 +27,6 @@ class Observacion(Base):
     created_at               = Column(DateTime, default=datetime.utcnow)
     updated_at               = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relaciones
-    proyecto    = relationship("Proyecto", back_populates="observaciones")
-    flujo_pasos = relationship("ObsFlujoPaso", back_populates="observacion", cascade="all, delete-orphan")
 
 
 class ObsFlujoPaso(Base):
@@ -40,5 +37,3 @@ class ObsFlujoPaso(Base):
     numero_paso    = Column(SmallInteger, nullable=False)  # 1-5
     descripcion    = Column(String(300), nullable=False)
 
-    # Relación
-    observacion = relationship("Observacion", back_populates="flujo_pasos")

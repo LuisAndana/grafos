@@ -15,7 +15,3 @@ class User(Base):
     created_at      = Column(DateTime, default=datetime.utcnow)
     last_login      = Column(DateTime, nullable=True)
 
-    # Relaciones
-    proyectos      = relationship("Proyecto", back_populates="user")
-    historial      = relationship("Historial", back_populates="user")
-    srs_documentos = relationship("SrsDocumento", back_populates="generado_by")

@@ -1,3 +1,4 @@
+# app/models/requerimiento_funcional.py
 from sqlalchemy import Column, BigInteger, String, Text, DateTime, Enum, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -6,15 +7,17 @@ from app.core.database import Base
 
 
 class PrioridadReqFunc(str, enum.Enum):
-    alta  = "Alta"
+    """Prioridad - valores tal como están en la BD"""
+    alta = "Alta"
     media = "Media"
-    baja  = "Baja"
+    baja = "Baja"
 
 
 class EstadoReqFunc(str, enum.Enum):
-    borrador    = "Borrador"
+    """Estado - valores tal como están en la BD"""
+    borrador = "Borrador"
     en_progreso = "En progreso"
-    completado  = "Completado"
+    completado = "Completado"
 
 
 class RequerimientoFuncional(Base):
@@ -25,10 +28,10 @@ class RequerimientoFuncional(Base):
     codigo      = Column(String(20), nullable=False)       # RF-001, RF-002...
     descripcion = Column(Text, nullable=False)
     actor       = Column(String(150), nullable=True)
-    prioridad   = Column(Enum(PrioridadReqFunc), nullable=False, default=PrioridadReqFunc.media)
-    estado      = Column(Enum(EstadoReqFunc), nullable=False, default=EstadoReqFunc.borrador)
+    # native_enum=False hace que SQLAlchemy no valide contra el enum de MySQL
+    # Esto permite leer datos que no coincidan exactamente con los valores del enum
+    prioridad = Column(String(50), default='Media')
+    estado = Column(String(50), default='Borrador')
     created_at  = Column(DateTime, default=datetime.utcnow)
     updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relación
-    proyecto = relationship("Proyecto", back_populates="requerimientos_funcionales")

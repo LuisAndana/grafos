@@ -29,7 +29,7 @@ class UserResponse(BaseModel):
     id: int
     email: str
     username: str
-    is_active: bool
+    is_active: int  # Cambiar a int porque DB lo almacena como SmallInteger
     created_at: datetime
 
     class Config:
