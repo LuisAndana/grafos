@@ -4,10 +4,7 @@ from fastapi.openapi.utils import get_openapi
 from app.core.database import Base, engine
 from app.core.config import get_settings
 
-# ════════════════════════════════════════════════════════════════════════════
-# MODELOS
-# ════════════════════════════════════════════════════════════════════════════
-
+# Modelos
 from app.models.user import User
 from app.models.proyecto import Proyecto
 from app.models.historial import Historial
@@ -17,34 +14,24 @@ from app.models.focus_group import FocusGroup
 from app.models.negociacion import Negociacion
 from app.models.observacion import Observacion
 from app.models.requerimiento_funcional import RequerimientoFuncional
-from app.models.requerimiento_no_funcional import RequerimientoNoFuncional
 from app.models.seguimiento_transaccional import SeguimientoTransaccional
 from app.models.stakeholder import Stakeholder
 from app.models.tipo_usuario_sistema import TipoUsuarioSistema
 from app.models.usuario_sistema import UsuarioSistema
 from app.models.validacion import Validacion
 
-# ════════════════════════════════════════════════════════════════════════════
-# ROUTERS
-# ════════════════════════════════════════════════════════════════════════════
-
+# Routers
 from app.routes.auth import router
 from app.routes.proyecto_router import router as proyecto_router
 from app.routes.stakeholder_router import router as stakeholder_router
-from app.routes.elicitacion_router import router as elicitacion_router
-from app.routes.rf_router import router as rf_router
-from app.routes.rnf_router import router as rnf_router
-from app.routes.negociacion_router import router as negociacion_router
-from app.routes.srs_router import router as srs_router
+from app.routes.elicitacion_router import router as elicitacion_router   # ← NUEVO
 
 settings = get_settings()
 
-# Crear tablas
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="SRS Manager API", version="1.0.0")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,15 +40,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Registrar routers
 app.include_router(router)
 app.include_router(proyecto_router)
 app.include_router(stakeholder_router)
-app.include_router(elicitacion_router)
-app.include_router(rf_router)
-app.include_router(rnf_router)
-app.include_router(negociacion_router)
-app.include_router(srs_router)
+app.include_router(elicitacion_router)   # ← NUEVO
 
 
 def custom_openapi():
@@ -88,11 +70,11 @@ def custom_openapi():
 
     for path in schema.get("paths", {}).values():
         for operation in path.values():
-            if isinstance(operation, dict) and "security" in operation:
+            if "security" in operation:
                 operation["security"] = [{"OAuth2PasswordBearer": []}]
 
     app.openapi_schema = schema
-    return app.openapi_schema
+    return schema
 
 
 app.openapi = custom_openapi
@@ -100,11 +82,7 @@ app.openapi = custom_openapi
 
 @app.get("/")
 async def root():
-    return {
-        "message": "API en funcionamiento",
-        "docs": "/docs",
-        "version": "1.0.0"
-    }
+    return {"message": "API en funcionamiento", "docs": "/docs"}
 
 
 @app.get("/health")
