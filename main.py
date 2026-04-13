@@ -23,6 +23,9 @@ from app.models.stakeholder import Stakeholder
 from app.models.tipo_usuario_sistema import TipoUsuarioSistema
 from app.models.usuario_sistema import UsuarioSistema
 from app.models.validacion import Validacion
+from app.models.tipo_usuario_proyecto import TipoUsuarioProyecto
+from app.models.caso_uso import CasoUso
+from app.models.restriccion import Restriccion
 
 # ════════════════════════════════════════════════════════════════════════════
 # ROUTERS
@@ -36,6 +39,9 @@ from app.routes.rf_router import router as rf_router
 from app.routes.rnf_router import router as rnf_router
 from app.routes.negociacion_router import router as negociacion_router
 from app.routes.srs_router import router as srs_router
+from app.routes.tipo_usuario_router import router as tipo_usuario_router
+from app.routes.caso_uso_router import router as caso_uso_router
+from app.routes.restriccion_router import router as restriccion_router
 
 settings = get_settings()
 
@@ -62,6 +68,9 @@ app.include_router(rf_router)
 app.include_router(rnf_router)
 app.include_router(negociacion_router)
 app.include_router(srs_router)
+app.include_router(tipo_usuario_router)
+app.include_router(caso_uso_router)
+app.include_router(restriccion_router)
 
 
 def custom_openapi():
