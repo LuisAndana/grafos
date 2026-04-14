@@ -46,6 +46,7 @@ from app.routes.restriccion_router import router as restriccion_router
 from app.routes.artefacto_router import router as artefacto_router
 from app.routes.validacion_router import router as validacion_router
 from app.routes.historial_router import router as historial_router
+from app.routes.generador_router import router as generador_router
 
 settings = get_settings()
 
@@ -78,6 +79,7 @@ app.include_router(restriccion_router)
 app.include_router(artefacto_router)
 app.include_router(validacion_router)
 app.include_router(historial_router)
+app.include_router(generador_router)
 
 
 def custom_openapi():
