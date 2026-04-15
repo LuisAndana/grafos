@@ -152,18 +152,86 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
 
 {contexto}
 
-Con base en esta especificación, genera código de implementación dividido en EXACTAMENTE tres bloques usando los marcadores exactos que se indican:
+Tu tarea es generar una APLICACIÓN COMPLETA Y FUNCIONAL lista para ejecutar, dividida en tres bloques con los marcadores exactos indicados.
+
+Dentro de cada bloque, usa el marcador @@FILE: ruta/archivo.ext@@ para separar cada archivo. Cada archivo debe ser independiente y funcional.
 
 [FRONTEND]
-Código Angular 18+ con standalone components, TypeScript estricto. Incluye el componente principal, servicio HTTP, y modelo de interfaz. Código funcional y completo.
+Genera una aplicación Angular 18+ completa y ejecutable con esta estructura de archivos:
+
+@@FILE: src/app/models/interfaces.ts@@
+(Todas las interfaces y tipos TypeScript del dominio)
+
+@@FILE: src/app/services/api.service.ts@@
+(Servicio Angular con HttpClient, todos los métodos CRUD para cada entidad, URL base configurable)
+
+@@FILE: src/app/app.component.ts@@
+(Componente raíz standalone con selector app-root, imports de RouterModule)
+
+@@FILE: src/app/app.routes.ts@@
+(Definición de rutas de la aplicación)
+
+@@FILE: src/app/components/main/main.component.ts@@
+(Componente principal standalone con toda la lógica: listados, formularios, CRUD completo, manejo de estados cargando/error/éxito)
+
+@@FILE: src/app/components/main/main.component.html@@
+(Template HTML completo con formularios, tablas/listados, botones de acción, mensajes de estado)
+
+@@FILE: src/app/components/main/main.component.css@@
+(Estilos CSS completos y modernos para el componente)
+
+@@FILE: src/environments/environment.ts@@
+(Configuración de entorno con apiUrl: 'http://localhost:8000')
+
+@@FILE: package.json@@
+(package.json de Angular 18 con todas las dependencias necesarias)
+
+@@FILE: angular.json@@
+(Configuración básica de Angular CLI para el proyecto)
+
+@@FILE: src/main.ts@@
+(Punto de entrada de la aplicación Angular con bootstrapApplication)
+
+@@FILE: src/index.html@@
+(HTML raíz con <app-root> y meta tags)
 
 [BACKEND]
-Código FastAPI con SQLAlchemy. Incluye el modelo de base de datos, esquemas Pydantic, servicio con lógica de negocio, y router con endpoints CRUD completos.
+Genera una aplicación FastAPI completa y ejecutable:
+
+@@FILE: main.py@@
+(FastAPI app con CORSMiddleware, include de todos los routers, creación de tablas)
+
+@@FILE: database.py@@
+(Configuración SQLAlchemy: engine, SessionLocal, Base, get_db dependency)
+
+@@FILE: models.py@@
+(Todos los modelos SQLAlchemy para las entidades del sistema)
+
+@@FILE: schemas.py@@
+(Todos los schemas Pydantic para request/response de cada entidad)
+
+@@FILE: crud.py@@
+(Funciones CRUD completas para cada entidad usando SQLAlchemy)
+
+@@FILE: router.py@@
+(APIRouter con todos los endpoints REST: GET, POST, PUT, DELETE para cada entidad)
+
+@@FILE: requirements.txt@@
+(fastapi, uvicorn, sqlalchemy, pymysql, python-dotenv, pydantic y otras dependencias necesarias)
+
+@@FILE: .env@@
+(Variables de entorno: DATABASE_URL con MySQL)
 
 [DATABASE]
-Script SQL completo (MySQL) para crear las tablas necesarias con sus relaciones, índices y restricciones.
+@@FILE: schema.sql@@
+(Script SQL completo MySQL: CREATE DATABASE, CREATE TABLE de todas las entidades con claves primarias, foráneas, índices. Datos de ejemplo con INSERT INTO coherentes con el proyecto)
 
-IMPORTANTE: Usa EXACTAMENTE los marcadores [FRONTEND], [BACKEND] y [DATABASE]. No agregues texto antes del primer marcador ni después del último bloque."""
+REGLAS IMPORTANTES:
+- Cada archivo debe tener código COMPLETO, funcional y listo para ejecutar sin modificaciones
+- NO uses placeholders como "# implementar aquí" o "TODO"
+- Los nombres de clases, rutas y variables deben reflejar el dominio real del proyecto
+- El frontend debe conectarse al backend en http://localhost:8000
+- Usa EXACTAMENTE los marcadores [FRONTEND], [BACKEND], [DATABASE] y @@FILE: ruta@@"""
 
     try:
         respuesta = client.models.generate_content(
