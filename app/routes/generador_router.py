@@ -1,6 +1,6 @@
 # app/routes/generador_router.py
 """
-Generador IA — genera código funcional y diagramas UML usando Claude AI.
+Generador IA — genera código funcional y diagramas UML usando Gemini 2.5 Flash.
 Recopila toda la información del proyecto (requerimientos, stakeholders,
 elicitación) para construir un contexto rico antes de llamar a la IA.
 """
@@ -30,30 +30,32 @@ class DiagramaRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _get_client():
-    """Retorna el cliente Anthropic o lanza 500 si no está configurado."""
+def _get_model():
+    """Configura y retorna el modelo Gemini, o lanza 500 si hay error."""
     try:
-        import anthropic  # type: ignore
+        import google.generativeai as genai  # type: ignore
     except ImportError:
         raise HTTPException(
             status_code=500,
-            detail="La librería 'anthropic' no está instalada. Ejecuta: pip install anthropic"
+            detail="La librería 'google-generativeai' no está instalada. Ejecuta: pip install google-generativeai"
         )
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    api_key = os.getenv("GOOGLE_API_KEY", "")
     if not api_key:
         raise HTTPException(
             status_code=500,
-            detail="ANTHROPIC_API_KEY no está configurada en el servidor. Agrégala al archivo .env"
+            detail="GOOGLE_API_KEY no está configurada en el servidor. Agrégala al archivo .env"
         )
-    import anthropic  # type: ignore
-    return anthropic.Anthropic(api_key=api_key)
+
+    import google.generativeai as genai  # type: ignore
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel("gemini-2.5-flash")
 
 
 def _build_context(proyecto_id: int, db: Session, user_id: int) -> str:
     """
     Recopila toda la información disponible del proyecto y la convierte
-    en un contexto de texto estructurado para el prompt de Claude.
+    en un contexto de texto estructurado para el prompt de Gemini.
     """
     # ── Proyecto base ─────────────────────────────────────────────────────
     proyecto = (
@@ -148,6 +150,18 @@ def _build_context(proyecto_id: int, db: Session, user_id: int) -> str:
     return ctx
 
 
+def _llamar_gemini(model, prompt: str) -> str:
+    """Llama a Gemini y retorna el texto de la respuesta."""
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al llamar a Gemini API: {str(e)}"
+        )
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
 @router.post("/codigo/{proyecto_id}")
@@ -158,9 +172,9 @@ async def generar_codigo(
 ):
     """
     Genera código funcional completo (Frontend Angular, Backend FastAPI, SQL)
-    usando toda la información recopilada del proyecto.
+    usando toda la información recopilada del proyecto con Gemini 2.5 Flash.
     """
-    client = _get_client()
+    model   = _get_model()
     context = _build_context(proyecto_id, db, user.id)
 
     prompt = f"""Eres un arquitecto de software senior. Tu tarea es generar código funcional, completo y listo para usar, basado EXCLUSIVAMENTE en la siguiente información real de un proyecto de software:
@@ -177,44 +191,29 @@ Genera los tres componentes de la aplicación. Usa los delimitadores EXACTOS:
 Genera un módulo Angular completo y funcional:
 • Interfaces TypeScript para TODOS los modelos del dominio del proyecto
 • Un servicio Angular (Injectable) con métodos HTTP (GET, POST, PUT, DELETE) para cada entidad
-• Un componente principal con su @Component, toda la lógica en el .ts, el template HTML completo con formularios reactivos/template-driven y listados, y estilos CSS
+• Un componente principal con toda la lógica en el .ts, template HTML completo con formularios y listados, y estilos CSS
 • Manejo de estados: cargando, error, éxito
-• Usa HttpClient, FormsModule/ReactiveFormsModule según sea apropiado
 • Los nombres de clases, métodos y variables deben reflejar el dominio real del proyecto
 
 ===BACKEND===
 Genera un router FastAPI completo en Python:
 • Modelos SQLAlchemy para TODAS las entidades del sistema
-• Schemas Pydantic para request/response con validaciones (Field, validator)
+• Schemas Pydantic para request/response con validaciones
 • Endpoints REST completos con operaciones CRUD para cada entidad
-• Autenticación JWT (Bearer token) donde corresponda
 • Manejo de errores con HTTPException y códigos HTTP correctos
 • Comentarios explicativos en cada función
 
 ===DATABASE===
 Genera el script SQL completo:
 • CREATE DATABASE IF NOT EXISTS con el nombre del proyecto
-• CREATE TABLE para TODAS las entidades con:
-  - Tipos de datos apropiados al dominio
-  - PRIMARY KEY, FOREIGN KEY, índices
-  - Restricciones NOT NULL, UNIQUE, DEFAULT donde aplique
-  - Comentarios en las tablas y columnas
-• INSERT INTO con datos de ejemplo realistas y coherentes con el proyecto
-• VISTAs útiles para las consultas más comunes del sistema
+• CREATE TABLE para TODAS las entidades con tipos de datos apropiados
+• PRIMARY KEY, FOREIGN KEY, índices y restricciones
+• INSERT INTO con datos de ejemplo realistas coherentes con el proyecto
+• VISTAs útiles para las consultas más comunes
 
-IMPORTANTE: El código debe ser FUNCIONAL y directamente usable, no un esqueleto ni pseudocódigo.
-Adapta TODOS los nombres, entidades y lógica al dominio real del proyecto descrito arriba."""
+IMPORTANTE: El código debe ser FUNCIONAL y directamente usable. Adapta TODOS los nombres, entidades y lógica al dominio real del proyecto descrito arriba."""
 
-    try:
-        import anthropic  # type: ignore
-        message = client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=8000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        response_text = message.content[0].text
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al llamar a Claude API: {str(e)}")
+    response_text = _llamar_gemini(model, prompt)
 
     # ── Parsear secciones ──────────────────────────────────────────────────
     frontend = ""
@@ -232,7 +231,7 @@ Adapta TODOS los nombres, entidades y lógica al dominio real del proyecto descr
                 if len(resto2) > 1:
                     database = resto2[1].strip()
 
-    # Fallback: si no se encontraron delimitadores
+    # Fallback si no hubo delimitadores
     if not frontend and not backend:
         frontend = response_text
 
@@ -253,10 +252,10 @@ async def generar_diagrama(
     user: User = Depends(get_current_user),
 ):
     """
-    Genera un diagrama UML en formato Mermaid usando la información del proyecto.
+    Genera un diagrama UML en formato Mermaid con Gemini 2.5 Flash.
     Tipos soportados: clases | secuencia | paquetes | casos_uso
     """
-    client = _get_client()
+    model   = _get_model()
     context = _build_context(proyecto_id, db, user.id)
 
     instrucciones = {
@@ -265,18 +264,16 @@ async def generar_diagrama(
             """Genera un diagrama de clases Mermaid (classDiagram) con:
 - TODAS las clases/entidades del sistema derivadas de los requerimientos, con atributos tipados
 - Métodos principales de negocio en cada clase
-- Relaciones correctas: herencia (--|>), composición (*--), agregación (o--)  , asociación (-->)
-- Cardinalidades explícitas ("1" .. "n", "0..*", etc.)
-- Notas (note) explicativas para las clases más importantes""",
+- Relaciones correctas: herencia (--|>), composición (*--), agregación (o--), asociación (-->)
+- Cardinalidades explícitas ("1" .. "n", "0..*", etc.)""",
         ),
         "secuencia": (
             "Diagrama de Secuencia UML",
             """Genera un diagrama de secuencia Mermaid (sequenceDiagram) del flujo principal:
 - Participantes: Usuario, Frontend (Angular), Backend (FastAPI), Base de Datos
-- El flujo más representativo del sistema según sus requerimientos funcionales
+- El flujo más representativo según los requerimientos funcionales
 - Mensajes de request/response con datos reales del dominio
-- Bloques alt/opt/loop donde el flujo lo requiera
-- Notas explicativas en los pasos clave""",
+- Bloques alt/opt/loop donde el flujo lo requiera""",
         ),
         "paquetes": (
             "Diagrama de Paquetes UML",
@@ -284,8 +281,7 @@ async def generar_diagrama(
 - Paquete Frontend: components, services, models, guards, interceptors
 - Paquete Backend: routes, services, models, schemas, core (db, auth, config)
 - Paquete Database: tablas agrupadas por módulo funcional
-- Dependencias entre paquetes con flechas etiquetadas
-- Colores de relleno para diferenciar capas (style)""",
+- Dependencias entre paquetes con flechas etiquetadas""",
         ),
         "casos_uso": (
             "Diagrama de Casos de Uso UML",
@@ -293,47 +289,37 @@ async def generar_diagrama(
 - TODOS los actores identificados en stakeholders y requerimientos
 - TODOS los casos de uso derivados de los requerimientos funcionales
 - Relaciones include (<<include>>) y extend (<<extend>>) donde aplique
-- Agrupa los casos de uso dentro del sistema usando subgraph
-- Usa etiquetas descriptivas en español""",
+- Agrupa los casos de uso dentro del sistema usando subgraph""",
         ),
     }
 
     if body.tipo not in instrucciones:
         raise HTTPException(
             status_code=400,
-            detail=f"Tipo de diagrama inválido: '{body.tipo}'. Use: clases, secuencia, paquetes, casos_uso"
+            detail=f"Tipo inválido: '{body.tipo}'. Use: clases, secuencia, paquetes, casos_uso"
         )
 
     tipo_label, tipo_instrucciones = instrucciones[body.tipo]
 
-    prompt = f"""Eres un experto en modelado UML y diagramas Mermaid.js. Genera el {tipo_label} para el siguiente proyecto de software:
+    prompt = f"""Eres un experto en modelado UML y diagramas Mermaid.js. Genera el {tipo_label} para el siguiente proyecto:
 
 {context}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INSTRUCCIONES ESPECÍFICAS PARA ESTE DIAGRAMA
+INSTRUCCIONES ESPECÍFICAS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {tipo_instrucciones}
 
 REGLAS DE FORMATO (MUY IMPORTANTE):
 1. Responde ÚNICAMENTE con el código Mermaid puro
-2. NO incluyas bloques markdown (no uses ```mermaid, no uses ```)
+2. NO incluyas bloques markdown (sin ```mermaid, sin ```)
 3. NO escribas explicaciones antes ni después del código
-4. El diagrama DEBE comenzar directamente con la palabra clave de Mermaid (classDiagram, sequenceDiagram, graph, etc.)
+4. Comienza directamente con la palabra clave Mermaid (classDiagram, sequenceDiagram, graph, etc.)
 5. Usa nombres en ESPAÑOL para entidades, actores y casos de uso
-6. El diagrama debe ser completo, detallado y funcional en Mermaid.js v10+"""
+6. El diagrama debe ser completo y funcional en Mermaid.js v10+"""
 
-    try:
-        import anthropic  # type: ignore
-        message = client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        codigo_mermaid = message.content[0].text.strip()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al llamar a Claude API: {str(e)}")
+    codigo_mermaid = _llamar_gemini(model, prompt).strip()
 
     # Limpiar posibles fences de markdown
     if codigo_mermaid.startswith("```"):
