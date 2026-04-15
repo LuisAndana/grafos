@@ -36,6 +36,7 @@ from app.routes.auth import router
 from app.routes.proyecto_router import router as proyecto_router
 from app.routes.stakeholder_router import router as stakeholder_router
 from app.routes.elicitacion_router import router as elicitacion_router
+<<<<<<< HEAD
 from app.routes.rf_router import router as rf_router
 from app.routes.rnf_router import router as rnf_router
 from app.routes.negociacion_router import router as negociacion_router
@@ -46,6 +47,9 @@ from app.routes.restriccion_router import router as restriccion_router
 from app.routes.artefacto_router import router as artefacto_router
 from app.routes.validacion_router import router as validacion_router
 from app.routes.historial_router import router as historial_router
+=======
+from app.routes.requerimiento_funcional_router import router as rf_router
+>>>>>>> origin/andana
 from app.routes.generador_router import router as generador_router
 
 settings = get_settings()
@@ -70,6 +74,7 @@ app.include_router(proyecto_router)
 app.include_router(stakeholder_router)
 app.include_router(elicitacion_router)
 app.include_router(rf_router)
+<<<<<<< HEAD
 app.include_router(rnf_router)
 app.include_router(negociacion_router)
 app.include_router(srs_router)
@@ -79,6 +84,8 @@ app.include_router(restriccion_router)
 app.include_router(artefacto_router)
 app.include_router(validacion_router)
 app.include_router(historial_router)
+=======
+>>>>>>> origin/andana
 app.include_router(generador_router)
 
 
