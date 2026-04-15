@@ -27,6 +27,7 @@ from app.routes.proyecto_router import router as proyecto_router
 from app.routes.stakeholder_router import router as stakeholder_router
 from app.routes.elicitacion_router import router as elicitacion_router
 from app.routes.requerimiento_funcional_router import router as rf_router
+from app.routes.generador_router import router as generador_router
 
 settings = get_settings()
 
@@ -47,6 +48,7 @@ app.include_router(proyecto_router)
 app.include_router(stakeholder_router)
 app.include_router(elicitacion_router)
 app.include_router(rf_router)
+app.include_router(generador_router)
 
 
 def custom_openapi():
