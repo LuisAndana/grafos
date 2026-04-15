@@ -1,5 +1,6 @@
 import re
 import os
+import json
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -148,90 +149,84 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
     contexto = _construir_contexto(datos)
     client = _get_client()
 
-    prompt = f"""Eres un experto en desarrollo de software. A continuación tienes la especificación completa de un proyecto de software:
+    # ── Esquema JSON que Gemini DEBE devolver ───────────────────────────
+    response_schema = {
+        "type": "object",
+        "required": ["files"],
+        "properties": {
+            "files": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["section", "path", "content"],
+                    "properties": {
+                        "section": {
+                            "type": "string",
+                            "enum": ["frontend", "backend", "database"],
+                            "description": "A qué capa pertenece el archivo",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Ruta relativa del archivo (ej: src/app/app.component.ts, main.py, schema.sql)",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Contenido COMPLETO del archivo, sin bloques markdown, sin placeholders",
+                        },
+                    },
+                },
+            }
+        },
+    }
+
+    prompt = f"""Eres un arquitecto de software senior. Tienes la especificación completa de un proyecto:
 
 {contexto}
 
-Tu tarea es generar una APLICACIÓN COMPLETA Y FUNCIONAL lista para ejecutar, dividida en tres bloques con los marcadores exactos indicados.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Genera una aplicación COMPLETA Y FUNCIONAL lista para ejecutar.
+Debes devolver un JSON con un array "files". Cada archivo debe tener:
+  - section: "frontend" | "backend" | "database"
+  - path: ruta relativa del archivo
+  - content: contenido COMPLETO del archivo (sin markdown, sin ```)
 
-Dentro de cada bloque, usa el marcador @@FILE: ruta/archivo.ext@@ para separar cada archivo. Cada archivo debe ser independiente y funcional.
+ARCHIVOS OBLIGATORIOS:
 
-[FRONTEND]
-Genera una aplicación Angular 18+ completa y ejecutable con esta estructura de archivos:
+FRONTEND (Angular 18+ standalone, section="frontend"):
+  1. src/app/models/interfaces.ts         — interfaces TypeScript del dominio
+  2. src/app/services/api.service.ts      — HttpClient con CRUD para cada entidad
+  3. src/app/app.component.ts             — componente raíz standalone
+  4. src/app/app.routes.ts                — rutas de la app
+  5. src/app/components/main/main.component.ts    — componente principal con lógica CRUD
+  6. src/app/components/main/main.component.html  — template completo
+  7. src/app/components/main/main.component.css   — estilos modernos
+  8. src/environments/environment.ts      — apiUrl: 'http://localhost:8000'
+  9. src/main.ts                          — bootstrapApplication
+ 10. src/index.html                       — HTML raíz con <app-root>
+ 11. package.json                         — Angular 18 con dependencias (@angular/core ^18, etc.)
+ 12. angular.json                         — configuración Angular CLI
+ 13. tsconfig.json                        — configuración TypeScript
 
-@@FILE: src/app/models/interfaces.ts@@
-(Todas las interfaces y tipos TypeScript del dominio)
+BACKEND (FastAPI, section="backend"):
+ 14. main.py              — FastAPI app con CORSMiddleware e include de router
+ 15. database.py          — engine SQLAlchemy, SessionLocal, Base, get_db
+ 16. models.py            — modelos SQLAlchemy de todas las entidades
+ 17. schemas.py           — schemas Pydantic request/response
+ 18. crud.py              — funciones CRUD completas
+ 19. router.py            — APIRouter con GET/POST/PUT/DELETE para cada entidad
+ 20. requirements.txt     — fastapi, uvicorn, sqlalchemy, pymysql, python-dotenv, pydantic
+ 21. .env                 — DATABASE_URL=mysql+pymysql://root:Admin1234!@localhost/<db_name>
 
-@@FILE: src/app/services/api.service.ts@@
-(Servicio Angular con HttpClient, todos los métodos CRUD para cada entidad, URL base configurable)
+DATABASE (section="database"):
+ 22. schema.sql           — CREATE DATABASE IF NOT EXISTS, CREATE TABLE de todas las entidades con PK/FK/índices, INSERT de datos de ejemplo
 
-@@FILE: src/app/app.component.ts@@
-(Componente raíz standalone con selector app-root, imports de RouterModule)
-
-@@FILE: src/app/app.routes.ts@@
-(Definición de rutas de la aplicación)
-
-@@FILE: src/app/components/main/main.component.ts@@
-(Componente principal standalone con toda la lógica: listados, formularios, CRUD completo, manejo de estados cargando/error/éxito)
-
-@@FILE: src/app/components/main/main.component.html@@
-(Template HTML completo con formularios, tablas/listados, botones de acción, mensajes de estado)
-
-@@FILE: src/app/components/main/main.component.css@@
-(Estilos CSS completos y modernos para el componente)
-
-@@FILE: src/environments/environment.ts@@
-(Configuración de entorno con apiUrl: 'http://localhost:8000')
-
-@@FILE: package.json@@
-(package.json de Angular 18 con todas las dependencias necesarias)
-
-@@FILE: angular.json@@
-(Configuración básica de Angular CLI para el proyecto)
-
-@@FILE: src/main.ts@@
-(Punto de entrada de la aplicación Angular con bootstrapApplication)
-
-@@FILE: src/index.html@@
-(HTML raíz con <app-root> y meta tags)
-
-[BACKEND]
-Genera una aplicación FastAPI completa y ejecutable:
-
-@@FILE: main.py@@
-(FastAPI app con CORSMiddleware, include de todos los routers, creación de tablas)
-
-@@FILE: database.py@@
-(Configuración SQLAlchemy: engine, SessionLocal, Base, get_db dependency)
-
-@@FILE: models.py@@
-(Todos los modelos SQLAlchemy para las entidades del sistema)
-
-@@FILE: schemas.py@@
-(Todos los schemas Pydantic para request/response de cada entidad)
-
-@@FILE: crud.py@@
-(Funciones CRUD completas para cada entidad usando SQLAlchemy)
-
-@@FILE: router.py@@
-(APIRouter con todos los endpoints REST: GET, POST, PUT, DELETE para cada entidad)
-
-@@FILE: requirements.txt@@
-(fastapi, uvicorn, sqlalchemy, pymysql, python-dotenv, pydantic y otras dependencias necesarias)
-
-@@FILE: .env@@
-(Variables de entorno: DATABASE_URL con MySQL)
-
-[DATABASE]
-@@FILE: schema.sql@@
-(Script SQL completo MySQL: CREATE DATABASE, CREATE TABLE de todas las entidades con claves primarias, foráneas, índices. Datos de ejemplo con INSERT INTO coherentes con el proyecto)
-
-REGLAS IMPORTANTES:
-- Cada archivo debe tener código COMPLETO, funcional y listo para ejecutar sin modificaciones
-- NO uses placeholders como "# implementar aquí" o "TODO"
-- Los nombres de clases, rutas y variables deben reflejar el dominio real del proyecto
-- El frontend debe conectarse al backend en http://localhost:8000
-- Usa EXACTAMENTE los marcadores [FRONTEND], [BACKEND], [DATABASE] y @@FILE: ruta@@"""
+REGLAS ESTRICTAS:
+- Cada "content" debe tener código COMPLETO y funcional, sin "# TODO", sin "# implementar aquí"
+- NUNCA uses fences markdown (sin ```python, sin ```)
+- El frontend se conecta al backend en http://localhost:8000
+- Los nombres de clases, rutas y variables deben reflejar el dominio del proyecto
+- Devuelve EXACTAMENTE los 22 archivos listados, ni más ni menos
+- Prioriza completitud sobre comentarios extensos"""
 
     try:
         respuesta = client.models.generate_content(
@@ -239,7 +234,9 @@ REGLAS IMPORTANTES:
             contents=prompt,
             config=types.GenerateContentConfig(
                 max_output_tokens=65536,
-                temperature=0.4,
+                temperature=0.3,
+                response_mime_type="application/json",
+                response_schema=response_schema,
             ),
         )
     except genai_errors.ServerError as e:
@@ -253,16 +250,40 @@ REGLAS IMPORTANTES:
             detail=f"Error al llamar a la API de Gemini: {e}",
         )
 
-    texto = respuesta.text
+    texto = respuesta.text or ""
 
-    frontend = _extraer_bloque(texto, "FRONTEND")
-    backend  = _extraer_bloque(texto, "BACKEND")
-    database = _extraer_bloque(texto, "DATABASE")
+    # ── Parsear JSON ─────────────────────────────────────────────────────
+    try:
+        data = json.loads(texto)
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Gemini devolvió un JSON inválido: {e}. Respuesta: {texto[:300]}",
+        )
 
-    if not frontend and not backend and not database:
-        backend = texto
+    archivos = data.get("files") or []
+    if not archivos:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini no devolvió archivos.",
+        )
 
-    return {"frontend": frontend, "backend": backend, "database": database}
+    # ── Reconstruir bloques con marcadores @@FILE: para compatibilidad ──
+    # El frontend ya entiende @@FILE:, así armamos ese formato y todo listo.
+    bloques = {"frontend": [], "backend": [], "database": []}
+    for arch in archivos:
+        seccion = (arch.get("section") or "").lower()
+        ruta    = (arch.get("path") or "").strip()
+        contenido = arch.get("content") or ""
+        if seccion not in bloques or not ruta:
+            continue
+        bloques[seccion].append(f"@@FILE: {ruta}@@\n{contenido}")
+
+    return {
+        "frontend": "\n\n".join(bloques["frontend"]),
+        "backend":  "\n\n".join(bloques["backend"]),
+        "database": "\n\n".join(bloques["database"]),
+    }
 
 
 # ── Generación de diagramas Mermaid ──────────────────────────────────────────
