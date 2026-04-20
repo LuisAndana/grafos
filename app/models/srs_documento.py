@@ -30,6 +30,19 @@ class SrsDocumento(Base):
     # Restricciones (almacenado como JSON)
     restricciones = Column(JSON, nullable=True, default=list)
 
+    # ── Nuevas secciones (auto-generadas desde los módulos del proyecto) ──
+    # Elicitación: {"entrevistas": [...], "procesos": [...], "necesidades": [...]}
+    elicitacion = Column(JSON, nullable=True, default=dict)
+
+    # Negociaciones: [{nombre, descripcion, prioridad, aceptado}, ...]
+    negociaciones = Column(JSON, nullable=True, default=list)
+
+    # Validación: {aprobado, aprobador, observaciones, checklist_*}
+    validacion_info = Column(JSON, nullable=True, default=dict)
+
+    # Artefactos: [{nombre, categoria, descripcion, nombre_archivo, tipo_mime}, ...]
+    artefactos_info = Column(JSON, nullable=True, default=list)
+
     # Metadata
     estado = Column(String(50), default='Borrador')  # Borrador, Completo, Aprobado
     version = Column(String(20), default='1.0')

@@ -1,6 +1,7 @@
 import re
 import os
 import json
+import traceback
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -8,7 +9,7 @@ from google.genai import errors as genai_errors
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
-load_dotenv()
+load_dotenv(override=True)
 
 from app.models.proyecto import Proyecto
 from app.models.stakeholder import Stakeholder
@@ -18,8 +19,27 @@ from app.models.tipo_usuario_proyecto import TipoUsuarioProyecto
 from app.models.caso_uso import CasoUso
 from app.models.restriccion import Restriccion
 from app.models.validacion import Validacion
+# ── Modelos adicionales para contexto completo ──
+from app.models.elicitacion import (
+    ElicitacionEntrevista,
+    ElicitacionProceso,
+    ElicitacionNecesidad,
+)
+from app.models.negociacion import Negociacion
+from app.models.srs_documento import SrsDocumento
+from app.models.artefacto import Artefacto
 
 MODEL = "models/gemini-2.5-flash"
+
+# ── Lectura de artefactos de texto ──────────────────────────────────────────
+_EXTENSIONES_TEXTO = {
+    "txt", "csv", "md", "json", "xml", "html", "yml", "yaml",
+    "py", "js", "ts", "sql", "css", "scss", "java", "c", "cpp",
+    "h", "rb", "php", "sh", "bat", "cfg", "ini", "toml", "env",
+    "log", "rst", "tex", "dpt",
+}
+_MAX_CHARS_POR_ARTEFACTO = 8000
+_MAX_ARTEFACTOS_TEXTO = 8
 
 # ── Cliente Gemini ────────────────────────────────────────────────────────────
 
@@ -48,6 +68,33 @@ def _recopilar_datos(db: Session, proyecto_id: int) -> dict:
     restricciones = db.query(Restriccion).filter(Restriccion.proyecto_id == proyecto_id).all()
     validacion    = db.query(Validacion).filter(Validacion.proyecto_id == proyecto_id).first()
 
+    # ── Datos de Elicitación ──
+    entrevistas   = db.query(ElicitacionEntrevista).filter(
+        ElicitacionEntrevista.proyecto_id == proyecto_id
+    ).all()
+    procesos      = db.query(ElicitacionProceso).filter(
+        ElicitacionProceso.proyecto_id == proyecto_id
+    ).all()
+    necesidades   = db.query(ElicitacionNecesidad).filter(
+        ElicitacionNecesidad.proyecto_id == proyecto_id,
+        ElicitacionNecesidad.seleccionada == 1,
+    ).all()
+
+    # ── Negociación ──
+    negociaciones = db.query(Negociacion).filter(
+        Negociacion.proyecto_id == proyecto_id
+    ).all()
+
+    # ── SRS existente ──
+    srs_docs      = db.query(SrsDocumento).filter(
+        SrsDocumento.proyecto_id == proyecto_id
+    ).all()
+
+    # ── Artefactos ──
+    artefactos    = db.query(Artefacto).filter(
+        Artefacto.proyecto_id == proyecto_id
+    ).all()
+
     return {
         "proyecto":      proyecto,
         "stakeholders":  stakeholders,
@@ -57,7 +104,35 @@ def _recopilar_datos(db: Session, proyecto_id: int) -> dict:
         "casos_uso":     casos_uso,
         "restricciones": restricciones,
         "validacion":    validacion,
+        "entrevistas":   entrevistas,
+        "procesos":      procesos,
+        "necesidades":   necesidades,
+        "negociaciones": negociaciones,
+        "srs_docs":      srs_docs,
+        "artefactos":    artefactos,
     }
+
+
+def _leer_contenido_artefacto(artefacto) -> str | None:
+    """Lee el contenido de un artefacto si es archivo de texto. Devuelve None si es binario o no existe."""
+    from pathlib import Path as _Path
+
+    nombre = artefacto.nombre_archivo or ""
+    ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
+    if ext not in _EXTENSIONES_TEXTO:
+        return None
+
+    ruta = _Path(artefacto.ruta_archivo)
+    if not ruta.exists():
+        return None
+
+    try:
+        contenido = ruta.read_text(encoding="utf-8", errors="ignore")
+        if len(contenido) > _MAX_CHARS_POR_ARTEFACTO:
+            contenido = contenido[:_MAX_CHARS_POR_ARTEFACTO] + "\n... (contenido truncado)"
+        return contenido
+    except Exception:
+        return None
 
 
 def _construir_contexto(datos: dict) -> str:
@@ -71,6 +146,7 @@ def _construir_contexto(datos: dict) -> str:
         "",
     ]
 
+    # ── Stakeholders ──────────────────────────────────────────────────────
     lineas.append("## Stakeholders")
     if datos["stakeholders"]:
         for s in datos["stakeholders"]:
@@ -81,6 +157,39 @@ def _construir_contexto(datos: dict) -> str:
         lineas.append("- (ninguno)")
     lineas.append("")
 
+    # ── Elicitación — Entrevistas ─────────────────────────────────────────
+    lineas.append("## Elicitación — Entrevistas con Usuarios")
+    if datos.get("entrevistas"):
+        for e in datos["entrevistas"]:
+            lineas.append(f"- Pregunta: {e.pregunta}")
+            lineas.append(f"  Respuesta: {e.respuesta or 'N/A'}")
+            if e.observaciones:
+                lineas.append(f"  Observaciones: {e.observaciones}")
+    else:
+        lineas.append("- (ninguna)")
+    lineas.append("")
+
+    # ── Elicitación — Procesos de Negocio ─────────────────────────────────
+    lineas.append("## Elicitación — Procesos de Negocio")
+    if datos.get("procesos"):
+        for proc in datos["procesos"]:
+            lineas.append(f"- {proc.nombre_proceso}: {proc.descripcion or 'N/A'}")
+            if proc.problemas_detectados:
+                lineas.append(f"  Problemas detectados: {proc.problemas_detectados}")
+    else:
+        lineas.append("- (ninguno)")
+    lineas.append("")
+
+    # ── Elicitación — Necesidades Identificadas ──────────────────────────
+    lineas.append("## Elicitación — Necesidades Identificadas")
+    if datos.get("necesidades"):
+        for n in datos["necesidades"]:
+            lineas.append(f"- {n.nombre}")
+    else:
+        lineas.append("- (ninguna)")
+    lineas.append("")
+
+    # ── Requerimientos Funcionales ────────────────────────────────────────
     lineas.append("## Requerimientos Funcionales")
     if datos["rfs"]:
         for r in datos["rfs"]:
@@ -89,6 +198,7 @@ def _construir_contexto(datos: dict) -> str:
         lineas.append("- (ninguno)")
     lineas.append("")
 
+    # ── Requerimientos No Funcionales ─────────────────────────────────────
     lineas.append("## Requerimientos No Funcionales")
     if datos["rnfs"]:
         for r in datos["rnfs"]:
@@ -98,6 +208,7 @@ def _construir_contexto(datos: dict) -> str:
         lineas.append("- (ninguno)")
     lineas.append("")
 
+    # ── Tipos de Usuario ─────────────────────────────────────────────────
     lineas.append("## Tipos de Usuario del Sistema")
     if datos["tipos_usuario"]:
         for t in datos["tipos_usuario"]:
@@ -106,14 +217,19 @@ def _construir_contexto(datos: dict) -> str:
         lineas.append("- (ninguno)")
     lineas.append("")
 
+    # ── Casos de Uso ─────────────────────────────────────────────────────
     lineas.append("## Casos de Uso")
     if datos["casos_uso"]:
         for c in datos["casos_uso"]:
             lineas.append(f"- {c.nombre} | Actores: {c.actores} | Descripción: {c.descripcion}")
+            pasos = c.pasos if isinstance(c.pasos, list) else []
+            for i, paso in enumerate(pasos, 1):
+                lineas.append(f"  {i}. {paso}")
     else:
         lineas.append("- (ninguno)")
     lineas.append("")
 
+    # ── Restricciones ────────────────────────────────────────────────────
     lineas.append("## Restricciones")
     if datos["restricciones"]:
         for r in datos["restricciones"]:
@@ -122,16 +238,100 @@ def _construir_contexto(datos: dict) -> str:
         lineas.append("- (ninguno)")
     lineas.append("")
 
+    # ── Negociación de Requerimientos ────────────────────────────────────
+    lineas.append("## Negociación de Requerimientos")
+    if datos.get("negociaciones"):
+        for n in datos["negociaciones"]:
+            estado = "Aceptado" if n.aceptado else "Pendiente"
+            lineas.append(f"- {n.nombre} | {estado} | Prioridad: {n.prioridad}")
+            lineas.append(f"  Descripción: {n.descripcion}")
+    else:
+        lineas.append("- (ninguna)")
+    lineas.append("")
+
+    # ── Estado de Validación ─────────────────────────────────────────────
     lineas.append("## Estado de Validación")
     v = datos["validacion"]
     if v:
         lineas.append(f"- Aprobado: {v.aprobado}")
         lineas.append(f"- Aprobador: {v.aprobador or 'N/A'}")
         lineas.append(f"- Observaciones: {v.observaciones or 'N/A'}")
+        checklist = []
+        if v.checklist_rf:             checklist.append("Req. Funcionales")
+        if v.checklist_rnf:            checklist.append("Req. No Funcionales")
+        if v.checklist_casos_uso:      checklist.append("Casos de Uso")
+        if v.checklist_restricciones:  checklist.append("Restricciones")
+        if v.checklist_prioridades:    checklist.append("Prioridades")
+        lineas.append(f"- Checklist validado: {', '.join(checklist) if checklist else 'ninguno'}")
     else:
         lineas.append("- (sin validación registrada)")
+    lineas.append("")
+
+    # ── Documentos SRS existentes ────────────────────────────────────────
+    srs_docs = datos.get("srs_docs", [])
+    if srs_docs:
+        lineas.append("## Documentos SRS del Proyecto")
+        for srs in srs_docs:
+            lineas.append(f"- {srs.nombre_documento} (v{srs.version}, estado: {srs.estado})")
+            if srs.introduccion:
+                lineas.append(f"  Introducción: {srs.introduccion[:500]}")
+        lineas.append("")
+
+    # ── Artefactos del proyecto (metadatos + contenido texto) ────────────
+    artefactos = datos.get("artefactos", [])
+    if artefactos:
+        lineas.append("## Artefactos / Documentos Adjuntos del Proyecto")
+        textos_incluidos = 0
+        for a in artefactos:
+            lineas.append(f"- {a.nombre} ({a.categoria}) — archivo: {a.nombre_archivo} [{a.tipo_mime}]")
+            if a.descripcion:
+                lineas.append(f"  Descripción: {a.descripcion}")
+
+            # Leer contenido de archivos de texto para dar más contexto a la IA
+            if textos_incluidos < _MAX_ARTEFACTOS_TEXTO:
+                contenido = _leer_contenido_artefacto(a)
+                if contenido:
+                    textos_incluidos += 1
+                    lineas.append(f"  ─── Contenido de {a.nombre_archivo} ───")
+                    lineas.append(contenido)
+                    lineas.append(f"  ─── Fin {a.nombre_archivo} ───")
+        lineas.append("")
 
     return "\n".join(lineas)
+
+
+# ── Post-procesamiento de contenido ──────────────────────────────────────────
+
+def _fix_contenido(ruta: str, contenido: str) -> str:
+    """
+    Corrige problemas comunes en el contenido generado por Gemini:
+    1. Reemplaza marcadores <NEWLINE> con saltos de línea reales
+    2. requirements.txt con todos los paquetes en una sola línea
+    3. .env con todas las variables pegadas
+    """
+    # ── Paso 1: Reemplazar marcadores <NEWLINE> ──────────────────────────
+    if "<NEWLINE>" in contenido:
+        contenido = contenido.replace("<NEWLINE>", "\n")
+
+    nombre = ruta.rsplit("/", 1)[-1].lower() if "/" in ruta else ruta.lower()
+
+    # ── Paso 2: Fallback para requirements.txt sin saltos ────────────────
+    if nombre == "requirements.txt" and "\n" not in contenido.strip():
+        contenido = re.sub(
+            r'([0-9]+(?:\.[0-9]+)*)((?:[a-zA-Z][\w-]*)(?:==|>=|<=|~=|!=))',
+            r'\1\n\2',
+            contenido,
+        )
+
+    # ── Paso 3: Fallback para .env sin saltos ────────────────────────────
+    if nombre == ".env" and "\n" not in contenido.strip():
+        contenido = re.sub(
+            r'([^\n=]+=[^\n=]+?)(?=(?:[A-Z_]+=))',
+            r'\1\n',
+            contenido,
+        )
+
+    return contenido
 
 
 # ── Parsing de bloques ────────────────────────────────────────────────────────
@@ -158,20 +358,21 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["section", "path", "content"],
+                    "required": ["section", "path", "lines"],
                     "properties": {
                         "section": {
                             "type": "string",
                             "enum": ["frontend", "backend", "database"],
-                            "description": "A qué capa pertenece el archivo",
+                            "description": "Capa: frontend, backend o database",
                         },
                         "path": {
                             "type": "string",
-                            "description": "Ruta relativa del archivo (ej: src/app/app.component.ts, main.py, schema.sql)",
+                            "description": "Ruta relativa del archivo",
                         },
-                        "content": {
-                            "type": "string",
-                            "description": "Contenido COMPLETO del archivo, sin bloques markdown, sin placeholders",
+                        "lines": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Contenido del archivo, UNA línea de código por elemento. Línea vacía = string vacío. Incluir indentación en cada línea.",
                         },
                     },
                 },
@@ -185,48 +386,60 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Genera una aplicación COMPLETA Y FUNCIONAL lista para ejecutar.
-Debes devolver un JSON con un array "files". Cada archivo debe tener:
-  - section: "frontend" | "backend" | "database"
-  - path: ruta relativa del archivo
-  - content: contenido COMPLETO del archivo (sin markdown, sin ```)
 
-ARCHIVOS OBLIGATORIOS:
+FORMATO DE RESPUESTA — MUY IMPORTANTE:
+Devuelve un JSON con un array "files". Cada archivo tiene:
+  - "section": "frontend" | "backend" | "database"
+  - "path": ruta relativa del archivo
+  - "lines": array de strings, UNA LÍNEA DE CÓDIGO POR ELEMENTO
+
+Ejemplo de "lines" para un archivo Python:
+["from fastapi import FastAPI", "", "app = FastAPI()", "", "if __name__ == \\"__main__\\":", "    import uvicorn", "    uvicorn.run(app)"]
+
+Cada string del array es una línea completa. Línea vacía = "". La indentación va dentro del string: "    return x".
+
+ARCHIVOS OBLIGATORIOS (25 archivos):
 
 FRONTEND (Angular 18+ standalone, section="frontend"):
   1. src/app/models/interfaces.ts         — interfaces TypeScript del dominio
   2. src/app/services/api.service.ts      — HttpClient con CRUD para cada entidad
-  3. src/app/app.component.ts             — componente raíz standalone
+  3. src/app/app.component.ts             — componente raíz standalone con selector 'app-root'
   4. src/app/app.routes.ts                — rutas de la app
-  5. src/app/components/main/main.component.ts    — componente principal con lógica CRUD
-  6. src/app/components/main/main.component.html  — template completo
-  7. src/app/components/main/main.component.css   — estilos modernos
-  8. src/environments/environment.ts      — apiUrl: 'http://localhost:8000'
-  9. src/main.ts                          — bootstrapApplication
- 10. src/index.html                       — HTML raíz con <app-root>
- 11. package.json                         — Angular 18 con dependencias (@angular/core ^18, etc.)
- 12. angular.json                         — configuración Angular CLI
- 13. tsconfig.json                        — configuración TypeScript
+  5. src/app/app.config.ts                — provideRouter, provideHttpClient, provideZoneChangeDetection
+  6. src/app/components/main/main.component.ts    — componente principal con lógica CRUD
+  7. src/app/components/main/main.component.html  — template completo
+  8. src/app/components/main/main.component.css   — estilos modernos
+  9. src/environments/environment.ts      — apiUrl: 'http://localhost:8000'
+ 10. src/main.ts                          — bootstrapApplication(AppComponent, appConfig)
+ 11. src/index.html                       — HTML raíz
+ 12. src/styles.css                       — estilos globales
+ 13. package.json                         — Angular 18 (@angular/core ^18, @angular/cli ^18)
+ 14. angular.json                         — Referenciar tsconfig.app.json, styles: [src/styles.css]
+ 15. tsconfig.json                        — config TypeScript base
+ 16. tsconfig.app.json                    — extends ./tsconfig.json, include src/**/*.ts
 
 BACKEND (FastAPI, section="backend"):
- 14. main.py              — FastAPI app con CORSMiddleware e include de router
- 15. database.py          — engine SQLAlchemy, SessionLocal, Base, get_db
- 16. models.py            — modelos SQLAlchemy de todas las entidades
- 17. schemas.py           — schemas Pydantic request/response
- 18. crud.py              — funciones CRUD completas
- 19. router.py            — APIRouter con GET/POST/PUT/DELETE para cada entidad
- 20. requirements.txt     — fastapi, uvicorn, sqlalchemy, pymysql, python-dotenv, pydantic
- 21. .env                 — DATABASE_URL=mysql+pymysql://root:Admin1234!@localhost/<db_name>
+ 17. main.py              — FastAPI app con CORSMiddleware e include de router
+ 18. database.py          — engine SQLAlchemy, SessionLocal, Base, get_db
+ 19. models.py            — modelos SQLAlchemy de todas las entidades
+ 20. schemas.py           — schemas Pydantic request/response
+ 21. crud.py              — funciones CRUD completas
+ 22. router.py            — APIRouter con GET/POST/PUT/DELETE para cada entidad
+ 23. requirements.txt     — fastapi, uvicorn, sqlalchemy, pymysql, python-dotenv, pydantic
+ 24. .env                 — DATABASE_URL=mysql+pymysql://root:Admin1234!@localhost/<db_name>
 
 DATABASE (section="database"):
- 22. schema.sql           — CREATE DATABASE IF NOT EXISTS, CREATE TABLE de todas las entidades con PK/FK/índices, INSERT de datos de ejemplo
+ 25. schema.sql           — CREATE DATABASE, CREATE TABLE, INSERT datos ejemplo
 
-REGLAS ESTRICTAS:
-- Cada "content" debe tener código COMPLETO y funcional, sin "# TODO", sin "# implementar aquí"
-- NUNCA uses fences markdown (sin ```python, sin ```)
-- El frontend se conecta al backend en http://localhost:8000
-- Los nombres de clases, rutas y variables deben reflejar el dominio del proyecto
-- Devuelve EXACTAMENTE los 22 archivos listados, ni más ni menos
-- Prioriza completitud sobre comentarios extensos"""
+REGLAS:
+- Código COMPLETO y funcional, sin "# TODO", sin placeholders
+- NUNCA uses fences markdown
+- Frontend conecta a http://localhost:8000
+- Nombres de clases/rutas/variables del dominio del proyecto
+- BACKEND: archivos en carpeta flat, imports absolutos: "from database import ...", "from models import ...". NUNCA imports relativos con punto.
+- FRONTEND: imports relativos TypeScript: "../services/api.service"
+- Cada método/función debe estar implementado completamente
+- Prioriza completitud sobre comentarios"""
 
     try:
         respuesta = client.models.generate_content(
@@ -240,14 +453,25 @@ REGLAS ESTRICTAS:
             ),
         )
     except genai_errors.ServerError as e:
+        print(f"[Gemini ServerError] {type(e).__name__}: {e}")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"El modelo de IA está saturado en este momento. Intenta de nuevo en unos segundos. ({e})",
         )
     except genai_errors.ClientError as e:
+        print(f"[Gemini ClientError] {type(e).__name__}: {e}")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Error al llamar a la API de Gemini: {e}",
+        )
+    except Exception as e:
+        print(f"[Gemini UnknownError] {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error inesperado llamando a Gemini: {type(e).__name__}: {e}",
         )
 
     texto = respuesta.text or ""
@@ -269,14 +493,21 @@ REGLAS ESTRICTAS:
         )
 
     # ── Reconstruir bloques con marcadores @@FILE: para compatibilidad ──
-    # El frontend ya entiende @@FILE:, así armamos ese formato y todo listo.
     bloques = {"frontend": [], "backend": [], "database": []}
     for arch in archivos:
         seccion = (arch.get("section") or "").lower()
         ruta    = (arch.get("path") or "").strip()
-        contenido = arch.get("content") or ""
         if seccion not in bloques or not ruta:
             continue
+
+        # Soportar ambos formatos: "lines" (array) o "content" (string)
+        lines = arch.get("lines")
+        if lines and isinstance(lines, list):
+            contenido = "\n".join(lines)
+        else:
+            contenido = arch.get("content") or ""
+
+        contenido = _fix_contenido(ruta, contenido)
         bloques[seccion].append(f"@@FILE: {ruta}@@\n{contenido}")
 
     return {
