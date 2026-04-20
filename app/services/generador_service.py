@@ -4,9 +4,7 @@ import json
 import time
 import traceback
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from google.genai import errors as genai_errors
+from openai import OpenAI, RateLimitError, APIStatusError, AuthenticationError
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
@@ -30,165 +28,93 @@ from app.models.negociacion import Negociacion
 from app.models.srs_documento import SrsDocumento
 from app.models.artefacto import Artefacto
 
-# Modelos disponibles en el free tier de Gemini API (abril 2025)
-MODEL_FLASH25      = "models/gemini-2.5-flash"      # 10 RPM · 20 RPD/día  · 65 536 tokens/respuesta
-MODEL_FLASH20      = "models/gemini-2.0-flash"       # 15 RPM · 1 500 RPD/día ·  8 192 tokens/respuesta
-MODEL_FLASH20_LITE = "models/gemini-2.0-flash-lite"  # 30 RPM · 1 500 RPD/día ·  8 192 tokens/respuesta
-
-# Alias usados por _call_gemini (compatibilidad con generar_diagrama)
-MODEL           = MODEL_FLASH25
-FALLBACK_MODELS = [MODEL_FLASH20, MODEL_FLASH20_LITE]
+# ── GitHub Models (Azure) — mucho más estable que Gemini free tier ──────────
+_GITHUB_ENDPOINT = "https://models.inference.ai.azure.com"
+MODEL_MAIN     = "gpt-4o-mini"  # 15 RPM · 150 RPD · rápido y económico
+MODEL_FALLBACK = "gpt-4o"       # 10 RPM ·  50 RPD · mayor calidad
 
 
-def _es_error_cuota(e: Exception) -> bool:
-    """True si el error es 429 RESOURCE_EXHAUSTED (límite RPM o cuota diaria)."""
-    msg = str(e)
-    return "429" in msg or "RESOURCE_EXHAUSTED" in msg
-
-
-def _extraer_retry_delay(e: Exception) -> float:
+def _call_ai(
+    client: OpenAI,
+    prompt: str,
+    model: str = MODEL_MAIN,
+    max_tokens: int = 4096,
+    json_mode: bool = True,
+) -> str:
     """
-    Extrae el tiempo de espera sugerido de un error 429 en segundos.
-    El API incluye 'retryDelay': '29s' en los errores de límite por minuto (RPM).
-    Devuelve 0.0 si no hay información de delay.
-    """
-    msg = str(e)
-    m = re.search(r'"retryDelay":\s*"([\d.]+)s"', msg)
-    if m:
-        return float(m.group(1))
-    m = re.search(r'retry in ([\d.]+)s', msg, re.IGNORECASE)
-    if m:
-        return float(m.group(1))
-    return 0.0
+    Llama a un modelo de GitHub Models (Azure) con reintentos automáticos.
 
+    - 429 RateLimitError  → espera el retry-after del header (mínimo 65 s) y reintenta.
+    - 5xx APIStatusError  → reintenta con backoff 30 s / 60 s.
+    - 401 AuthError       → falla de inmediato (token inválido).
+    - Otros               → falla de inmediato.
 
-def _call_gemini_modelo(
-    client: genai.Client,
-    model: str,
-    contents: str,
-    config: types.GenerateContentConfig,
-    max_503_retries: int = 2,
-):
+    Devuelve el texto plano de la respuesta.
     """
-    Llama a UN modelo Gemini específico con reintentos robustos.
+    system_msg = (
+        "Eres un arquitecto de software senior especializado en aplicaciones web full-stack. "
+        + ("Devuelve SIEMPRE un objeto JSON válido como se indica en las instrucciones." if json_mode else "")
+    )
+    kwargs: dict = dict(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=max_tokens,
+    )
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
 
-    - 503 UNAVAILABLE   → hasta max_503_retries intentos con 90 s y 180 s de espera.
-                          El servidor tarda varios minutos en recuperarse; esperas cortas no sirven.
-    - 429 RPM (≤90 s)   → espera 120 s y reintenta; si falla de nuevo espera 240 s más.
-    - 429 cuota diaria  → lanza HTTPException(429) inmediatamente.
-    - 404 NOT_FOUND     → lanza HTTPException(404).
-    - Otros ClientError → lanza HTTPException(400).
-    """
-    for attempt in range(1, max_503_retries + 1):
+    for attempt in range(1, 4):   # hasta 3 intentos
         try:
-            print(f"[Gemini] {model} — intento {attempt}/{max_503_retries}...")
-            return client.models.generate_content(
-                model=model, contents=contents, config=config,
-            )
-        except genai_errors.ServerError as e:
-            if attempt < max_503_retries:
-                wait = 90 * attempt   # 90 s → 180 s  (el servidor necesita tiempo real)
-                print(f"[Gemini 503] {model} saturado, reintentando en {wait}s...")
+            print(f"[AI] {model} — intento {attempt}/3...")
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content or ""
+        except RateLimitError as e:
+            wait = 65
+            try:
+                ra = e.response.headers.get("retry-after")
+                if ra:
+                    wait = int(ra) + 5
+            except Exception:
+                pass
+            if attempt < 3:
+                print(f"[AI RPM] {model} límite de tasa, esperando {wait}s...")
                 time.sleep(wait)
             else:
-                print(f"[Gemini 503] {model} agotó {max_503_retries} reintentos.")
                 raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Modelo {model} no disponible (503) tras {max_503_retries} intentos.",
+                    status_code=429,
+                    detail=f"Rate limit persistente en {model}. Intenta en unos minutos.",
                 )
-        except genai_errors.ClientError as e:
-            if _es_error_cuota(e):
-                delay = _extraer_retry_delay(e)
-                if 0 < delay <= 90:
-                    # ── Reintento 1: esperar la ventana completa ──────────────
-                    wait1 = max(delay + 10, 120)   # mínimo 2 minutos
-                    print(f"[Gemini RPM] {model} límite/min, esperando {wait1:.0f}s (intento 1/2)...")
-                    time.sleep(wait1)
-                    try:
-                        print(f"[Gemini] {model} reintento 1 post-RPM...")
-                        return client.models.generate_content(
-                            model=model, contents=contents, config=config,
-                        )
-                    except genai_errors.ClientError as r1:
-                        if not _es_error_cuota(r1):
-                            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(r1))
-                        # ── Reintento 2: ventana de 4 minutos adicionales ─────
-                        wait2 = 240
-                        print(f"[Gemini RPM] {model} sigue con límite, esperando {wait2}s adicionales (intento 2/2)...")
-                        time.sleep(wait2)
-                        try:
-                            print(f"[Gemini] {model} reintento 2 post-RPM...")
-                            return client.models.generate_content(
-                                model=model, contents=contents, config=config,
-                            )
-                        except genai_errors.ClientError as r2:
-                            if _es_error_cuota(r2):
-                                print(f"[Gemini RPM] {model} agotó 2 reintentos RPM ({wait1+wait2:.0f}s total).")
-                                raise HTTPException(429, detail=f"RPM persistente: {model}.")
-                            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(r2))
-                        except Exception as r2:
-                            raise HTTPException(503, detail=str(r2))
-                    except Exception as r1:
-                        raise HTTPException(503, detail=str(r1))
+        except APIStatusError as e:
+            if e.status_code >= 500:
+                if attempt < 3:
+                    wait = 30 * attempt   # 30 s, 60 s
+                    print(f"[AI {e.status_code}] {model} error servidor, reintentando en {wait}s...")
+                    time.sleep(wait)
                 else:
-                    # Sin delay o delay largo → cuota diaria agotada
-                    print(f"[Gemini 429] Cuota diaria agotada en {model}.")
-                    raise HTTPException(429, detail=f"Cuota diaria agotada: {model}.")
-            elif "404" in str(e) or "NOT_FOUND" in str(e):
-                print(f"[Gemini 404] {model} no disponible en esta API.")
-                raise HTTPException(404, detail=f"Modelo no encontrado: {model}.")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"Servidor no disponible ({model}). Intenta de nuevo en unos minutos.",
+                    )
             else:
-                print(f"[Gemini ClientError] {e}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Error al llamar a Gemini ({model}): {e}",
-                )
+                print(f"[AI Error {e.status_code}] {e}")
+                raise HTTPException(status_code=e.status_code, detail=str(e))
+        except AuthenticationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="GITHUB_TOKEN inválido o expirado. Genera un nuevo token en github.com/settings/tokens",
+            )
         except Exception as e:
-            print(f"[Gemini UnknownError] {type(e).__name__}: {e}")
+            print(f"[AI UnknownError] {type(e).__name__}: {e}")
             traceback.print_exc()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error inesperado: {type(e).__name__}: {e}",
             )
     raise HTTPException(status_code=503, detail=f"No se pudo contactar a {model}.")
-
-
-def _call_gemini(
-    client: genai.Client,
-    contents: str,
-    config: types.GenerateContentConfig,
-    max_retries: int = 2,   # mantenido por compatibilidad, ya no se usa directamente
-):
-    """
-    Prueba los modelos en secuencia hasta obtener respuesta.
-    Usado principalmente por generar_diagrama.
-
-    - 429 / 503 / 404 en un modelo → intenta el siguiente.
-    - 400 / 500              → falla de inmediato (error de cliente/servidor real).
-    """
-    last_error = None
-    for model in [MODEL] + FALLBACK_MODELS:
-        try:
-            return _call_gemini_modelo(client, model, contents, config)
-        except HTTPException as e:
-            last_error = e
-            if e.status_code in (429, 503, 404):
-                print(f"[Gemini] {model} → {e.status_code}, probando siguiente modelo...")
-                continue
-            raise   # 400, 500: error real, no vale la pena probar otro modelo
-        except Exception as e:
-            raise HTTPException(500, detail=str(e))
-
-    # Todos los modelos fallaron
-    detail = (
-        "Todos los modelos de IA están con límites de uso. "
-        "Espera 5 minutos (límite/min) o intenta mañana (límite diario). "
-        "Detalle: " + (last_error.detail if last_error else "desconocido")
-    )
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=detail,
-    )
 
 # ── Lectura de artefactos de texto ──────────────────────────────────────────
 _EXTENSIONES_TEXTO = {
@@ -202,14 +128,14 @@ _MAX_ARTEFACTOS_TEXTO = 4         # reducido para ahorrar tokens de entrada
 
 # ── Cliente Gemini ────────────────────────────────────────────────────────────
 
-def _get_client() -> genai.Client:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+def _get_client() -> OpenAI:
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="GEMINI_API_KEY no configurada en el servidor.",
+            detail="GITHUB_TOKEN no configurado. Agrégalo al archivo .env",
         )
-    return genai.Client(api_key=api_key)
+    return OpenAI(base_url=_GITHUB_ENDPOINT, api_key=token)
 
 
 # ── Recopilación de datos del proyecto ───────────────────────────────────────
@@ -504,15 +430,25 @@ def _extraer_bloque(texto: str, marcador: str) -> str:
 # ── Prompts de generación (divididos en 3 partes para ahorrar tokens) ─────────
 
 _FORMATO_COMUN = """\
-FORMATO DE RESPUESTA:
-Devuelve JSON con array "files". Cada archivo:
-  "section": "frontend"|"backend"|"database"
-  "path": ruta relativa
-  "lines": array de strings — UNA LÍNEA POR ELEMENTO, línea vacía = ""
+FORMATO DE RESPUESTA (JSON ESTRICTO):
+Devuelve ÚNICAMENTE un objeto JSON con la clave "files" que contiene un array.
+Cada elemento del array representa un archivo:
+  "section": "frontend" | "backend" | "database"
+  "path":    ruta relativa del archivo (ej: "main.py", "src/app/app.component.ts")
+  "lines":   array de strings — UNA LÍNEA POR ELEMENTO, línea vacía = ""
+
+Ejemplo de estructura correcta:
+{
+  "files": [
+    {"section": "backend",  "path": "main.py",        "lines": ["from fastapi import FastAPI", "app = FastAPI()"]},
+    {"section": "database", "path": "schema.sql",     "lines": ["CREATE TABLE users (id INT PRIMARY KEY);"]},
+    {"section": "frontend", "path": "src/main.ts",    "lines": ["import { bootstrapApplication } from '@angular/platform-browser';"]}
+  ]
+}
 
 REGLAS:
 - Código COMPLETO, sin TODO, sin placeholders
-- NUNCA uses fences markdown ni triple backticks
+- NUNCA uses fences markdown ni triple backticks dentro del contenido
 - Backend: imports absolutos (from database import ..., from models import ...)
 - Frontend conecta a http://localhost:8000"""
 
@@ -670,78 +606,51 @@ def _armar_resultado(todos_archivos: list) -> dict:
 
 def generar_codigo(db: Session, proyecto_id: int) -> dict:
     """
-    Genera la aplicación completa con dos estrategias, de más eficiente a más tolerante:
+    Genera la aplicación completa en 3 partes usando GitHub Models (Azure).
 
-    Estrategia 1 — gemini-2.5-flash, llamada ÚNICA (65 536 tokens de salida):
-      • Solo consume 1 RPD en lugar de 3 → menos presión sobre la cuota diaria.
-      • 10 RPM es suficiente para uso interactivo normal.
-      • Si falla (503 persistente, RPM o cuota diaria) → pasa a Estrategia 2.
+    Modelo principal : gpt-4o-mini  (15 RPM · 150 RPD · estable)
+    Modelo fallback  : gpt-4o       (10 RPM ·  50 RPD · mayor calidad)
 
-    Estrategia 2 — gemini-2.0-flash / gemini-2.0-flash-lite, 3 llamadas de 8 192 tokens:
-      • 1 500 RPD disponibles → útil cuando gemini-2.5-flash no responde.
-      • Espera 30 s entre partes para respetar el RPM.
+    Se divide en 3 partes para mantenerse dentro del límite de tokens de salida
+    por petición (~4 096 tokens en el free tier de GitHub Models).
     """
     datos    = _recopilar_datos(db, proyecto_id)
     contexto = _construir_contexto(datos)
     client   = _get_client()
 
-    # ── Estrategia 1: llamada única con gemini-2.5-flash (65 K tokens) ──────
-    print("[Generador] Estrategia 1 — gemini-2.5-flash, llamada única (65 536 tokens)...")
-    config_25 = types.GenerateContentConfig(
-        max_output_tokens=65536,
-        temperature=0.3,
-        response_mime_type="application/json",
-        response_schema=_SCHEMA_ARCHIVOS,
-    )
-    todos_archivos: list = []
-    try:
-        resp = _call_gemini_modelo(client, MODEL_FLASH25, _prompt_completo(contexto), config_25)
-        todos_archivos = (json.loads(resp.text or "{}")).get("files") or []
-    except HTTPException as e:
-        print(f"[Generador] Estrategia 1 falló ({e.status_code}): {e.detail}")
-    except Exception as e:
-        print(f"[Generador] Estrategia 1 error inesperado: {e}")
-
-    if todos_archivos:
-        print(f"[Generador] Estrategia 1 exitosa — {len(todos_archivos)} archivos generados.")
-        return _armar_resultado(todos_archivos)
-
-    # ── Cooldown antes de Estrategia 2 ──────────────────────────────────────
-    # Las peticiones fallidas a gemini-2.5-flash pueden haber saturado los
-    # límites del proyecto; esperar 60 s da tiempo a que los contadores RPM
-    # de los modelos 2.0-flash se limpien completamente.
-    print("[Generador] Esperando 60 s de cooldown antes de Estrategia 2...")
-    time.sleep(60)
-
-    # ── Estrategia 2: 3 partes con gemini-2.0-flash → gemini-2.0-flash-lite ─
-    print("[Generador] Estrategia 2 — modo 3 partes (8 192 tokens cada una)...")
-    config_20 = types.GenerateContentConfig(
-        max_output_tokens=8192,
-        temperature=0.3,
-        response_mime_type="application/json",
-        response_schema=_SCHEMA_ARCHIVOS,
-    )
     partes = [
         ("backend y base de datos", _prompt_backend_db(contexto)),
         ("frontend core",           _prompt_frontend_core(contexto)),
         ("frontend componentes",    _prompt_frontend_componentes(contexto)),
     ]
 
+    todos_archivos: list = []
+
     for i, (nombre_parte, prompt) in enumerate(partes):
         if i > 0:
-            print(f"[Generador] Esperando 30 s antes de parte {i + 1}/{len(partes)}...")
-            time.sleep(30)
+            # Pequeña pausa entre llamadas para respetar el RPM
+            print(f"[Generador] Esperando 5 s antes de parte {i + 1}/{len(partes)}...")
+            time.sleep(5)
 
         archivos_parte: list = []
-        for modelo in [MODEL_FLASH20, MODEL_FLASH20_LITE]:
+        for modelo in [MODEL_MAIN, MODEL_FALLBACK]:
             try:
-                resp = _call_gemini_modelo(client, modelo, prompt, config_20)
-                archivos_parte = (json.loads(resp.text or "{}")).get("files") or []
+                print(f"[Generador] Parte '{nombre_parte}' con {modelo}...")
+                texto = _call_ai(client, prompt, model=modelo, max_tokens=4096)
+                data  = json.loads(texto)
+                archivos_parte = data.get("files") or []
                 if archivos_parte:
-                    print(f"[Generador] Parte '{nombre_parte}' generada con {modelo}.")
+                    print(f"[Generador] ✓ Parte '{nombre_parte}' — {len(archivos_parte)} archivos.")
                     break
+                else:
+                    print(f"[Generador] {modelo} devolvió JSON vacío en '{nombre_parte}', probando fallback...")
             except HTTPException as e:
-                print(f"[Generador] {modelo} falló en parte '{nombre_parte}': {e.detail}")
+                print(f"[Generador] {modelo} falló en '{nombre_parte}' ({e.status_code}): {e.detail}")
+                if e.status_code in (429, 503):
+                    continue   # intenta el siguiente modelo
+                raise
+            except json.JSONDecodeError as exc:
+                print(f"[Generador] JSON inválido de {modelo}: {exc}")
                 continue
 
         if not archivos_parte:
@@ -749,19 +658,19 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=(
                     f"No se pudo generar la parte '{nombre_parte}'. "
-                    "Todos los modelos de IA están con límites de uso. "
-                    "Espera al menos 5 minutos e intenta de nuevo."
+                    "Verifica que GITHUB_TOKEN esté configurado y sea válido. "
+                    "Intenta de nuevo en unos minutos si es un error temporal."
                 ),
             )
         todos_archivos.extend(archivos_parte)
 
     if not todos_archivos:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No se generó ningún archivo. Intenta de nuevo en unos minutos.",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se generó ningún archivo. Intenta de nuevo.",
         )
 
-    print(f"[Generador] Estrategia 2 exitosa — {len(todos_archivos)} archivos generados.")
+    print(f"[Generador] ✓ Generación completa — {len(todos_archivos)} archivos en total.")
     return _armar_resultado(todos_archivos)
 
 
@@ -789,9 +698,9 @@ _INSTRUCCIONES_DIAGRAMA = {
 
 
 def generar_diagrama(db: Session, proyecto_id: int, tipo: str) -> dict:
-    datos = _recopilar_datos(db, proyecto_id)
+    datos    = _recopilar_datos(db, proyecto_id)
     contexto = _construir_contexto(datos)
-    client = _get_client()
+    client   = _get_client()
 
     instruccion = _INSTRUCCIONES_DIAGRAMA.get(tipo, "Genera un diagrama Mermaid apropiado.")
 
@@ -807,18 +716,11 @@ REGLAS ESTRICTAS:
 3. Usa nombres en español basados en la especificación del proyecto.
 4. El diagrama debe ser coherente con los datos del proyecto proporcionados."""
 
-    respuesta = _call_gemini(
-        client,
-        prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=8192,
-            temperature=0.4,
-        ),
+    codigo_mermaid = _call_ai(
+        client, prompt, model=MODEL_MAIN, max_tokens=2048, json_mode=False,
     )
 
-    codigo_mermaid = respuesta.text
-
-    # Limpiar posibles bloques markdown
+    # Limpiar posibles bloques markdown residuales
     codigo_mermaid = re.sub(r"^```(?:mermaid)?\n?", "", codigo_mermaid.strip(), flags=re.MULTILINE)
     codigo_mermaid = re.sub(r"\n?```$", "", codigo_mermaid.strip(), flags=re.MULTILINE)
 
