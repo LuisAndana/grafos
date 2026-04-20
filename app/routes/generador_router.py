@@ -12,6 +12,12 @@ from app.services import generador_service as service
 router = APIRouter(prefix="/api/generador", tags=["Generador IA"])
 
 
+@router.get("/test-conexion")
+def test_conexion():
+    """Prueba rápida: verifica que el token y la API de GitHub Models funcionen."""
+    return service.test_conexion()
+
+
 @router.post("/codigo/{proyecto_id}", response_model=GeneradorCodigoResponse)
 def generar_codigo(
     proyecto_id: int,

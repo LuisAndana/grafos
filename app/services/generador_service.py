@@ -9,8 +9,17 @@ from openai import OpenAI, RateLimitError, APIStatusError, AuthenticationError
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
+# ── Logging — usa handler propio para que funcione con uvicorn ──────────────
+# logging.basicConfig() es un no-op si uvicorn ya configuró el root logger,
+# así que añadimos nuestro propio StreamHandler directamente.
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
+log.setLevel(logging.DEBUG)
+if not log.handlers:
+    _sh = logging.StreamHandler()
+    _sh.setLevel(logging.DEBUG)
+    _sh.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+    log.addHandler(_sh)
+    log.propagate = False   # evitar duplicados si root también tiene handler
 
 load_dotenv(override=True)
 
@@ -153,7 +162,27 @@ def _get_client() -> OpenAI:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GITHUB_TOKEN no configurado. Agrégalo al archivo .env",
         )
+    log.debug(f"[AI] Token cargado: {token[:8]}...{token[-4:]}")
     return OpenAI(base_url=_GITHUB_ENDPOINT, api_key=token)
+
+
+def test_conexion() -> dict:
+    """Prueba rápida de la conexión con GitHub Models sin necesitar proyecto."""
+    log.info("[Test] Iniciando prueba de conexión con GitHub Models...")
+    client = _get_client()
+    try:
+        respuesta = _call_ai(
+            client,
+            "Responde únicamente con la palabra: OK",
+            model=MODEL_MAIN,
+            max_tokens=10,
+            json_mode=False,
+        )
+        log.info(f"[Test] ✓ Conexión OK — respuesta: {respuesta.strip()!r}")
+        return {"status": "ok", "modelo": MODEL_MAIN, "respuesta": respuesta.strip()}
+    except HTTPException as e:
+        log.error(f"[Test] ✗ Falló ({e.status_code}): {e.detail}")
+        return {"status": "error", "codigo": e.status_code, "detalle": e.detail}
 
 
 # ── Recopilación de datos del proyecto ───────────────────────────────────────
@@ -634,6 +663,20 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
     """
     datos    = _recopilar_datos(db, proyecto_id)
     contexto = _construir_contexto(datos)
+
+    # ── Guard de longitud: GitHub Models free tier ≈ 8 k tokens totales ──────
+    # Reservamos ~3 500 tokens para instrucciones + salida; el resto es contexto.
+    # 1 token ≈ 4 caracteres (estimación conservadora para español)
+    MAX_CONTEXTO_CHARS = 16_000   # ≈ 4 000 tokens
+    ctx_len = len(contexto)
+    log.info(f"[Generador] Contexto: {ctx_len} chars (~{ctx_len // 4} tokens estimados)")
+    if ctx_len > MAX_CONTEXTO_CHARS:
+        log.warning(
+            f"[Generador] Contexto demasiado largo ({ctx_len} chars), "
+            f"truncando a {MAX_CONTEXTO_CHARS} chars..."
+        )
+        contexto = contexto[:MAX_CONTEXTO_CHARS] + "\n\n[CONTEXTO TRUNCADO POR LONGITUD]"
+
     client   = _get_client()
 
     partes = [
@@ -718,6 +761,11 @@ _INSTRUCCIONES_DIAGRAMA = {
 def generar_diagrama(db: Session, proyecto_id: int, tipo: str) -> dict:
     datos    = _recopilar_datos(db, proyecto_id)
     contexto = _construir_contexto(datos)
+
+    MAX_CONTEXTO_CHARS = 16_000
+    if len(contexto) > MAX_CONTEXTO_CHARS:
+        contexto = contexto[:MAX_CONTEXTO_CHARS] + "\n\n[CONTEXTO TRUNCADO POR LONGITUD]"
+
     client   = _get_client()
 
     instruccion = _INSTRUCCIONES_DIAGRAMA.get(tipo, "Genera un diagrama Mermaid apropiado.")
