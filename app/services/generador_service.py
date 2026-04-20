@@ -2,11 +2,15 @@ import re
 import os
 import json
 import time
+import logging
 import traceback
 from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError, APIStatusError, AuthenticationError
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
+
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
 
 load_dotenv(override=True)
 
@@ -44,33 +48,30 @@ def _call_ai(
     """
     Llama a un modelo de GitHub Models (Azure) con reintentos automáticos.
 
-    - 429 RateLimitError  → espera el retry-after del header (mínimo 65 s) y reintenta.
+    - 429 RateLimitError  → espera retry-after del header (mínimo 65 s) y reintenta.
     - 5xx APIStatusError  → reintenta con backoff 30 s / 60 s.
-    - 401 AuthError       → falla de inmediato (token inválido).
+    - 401/403 AuthError   → falla de inmediato (token inválido).
     - Otros               → falla de inmediato.
 
     Devuelve el texto plano de la respuesta.
     """
-    system_msg = (
-        "Eres un arquitecto de software senior especializado en aplicaciones web full-stack. "
-        + ("Devuelve SIEMPRE un objeto JSON válido como se indica en las instrucciones." if json_mode else "")
-    )
-    kwargs: dict = dict(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user",   "content": prompt},
-        ],
-        temperature=0.3,
-        max_tokens=max_tokens,
-    )
+    system_msg = "Eres un arquitecto de software senior especializado en aplicaciones web full-stack."
     if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
+        system_msg += " Devuelve SIEMPRE únicamente un objeto JSON válido, sin texto adicional."
 
     for attempt in range(1, 4):   # hasta 3 intentos
         try:
-            print(f"[AI] {model} — intento {attempt}/3...")
-            resp = client.chat.completions.create(**kwargs)
+            log.info(f"[AI] {model} — intento {attempt}/3...")
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user",   "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+                # NO se usa response_format para máxima compatibilidad con GitHub Models
+            )
             return resp.choices[0].message.content or ""
         except RateLimitError as e:
             wait = 65
@@ -81,7 +82,7 @@ def _call_ai(
             except Exception:
                 pass
             if attempt < 3:
-                print(f"[AI RPM] {model} límite de tasa, esperando {wait}s...")
+                log.warning(f"[AI RPM] {model} límite de tasa, esperando {wait}s...")
                 time.sleep(wait)
             else:
                 raise HTTPException(
@@ -89,26 +90,43 @@ def _call_ai(
                     detail=f"Rate limit persistente en {model}. Intenta en unos minutos.",
                 )
         except APIStatusError as e:
+            body = ""
+            try:
+                body = e.response.text[:400]
+            except Exception:
+                body = str(e)
+            log.error(f"[AI Error {e.status_code}] {model}: {e.message} | body: {body}")
             if e.status_code >= 500:
                 if attempt < 3:
                     wait = 30 * attempt   # 30 s, 60 s
-                    print(f"[AI {e.status_code}] {model} error servidor, reintentando en {wait}s...")
+                    log.warning(f"[AI {e.status_code}] reintentando en {wait}s...")
                     time.sleep(wait)
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         detail=f"Servidor no disponible ({model}). Intenta de nuevo en unos minutos.",
                     )
+            elif e.status_code in (401, 403):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=(
+                        "GITHUB_TOKEN inválido, expirado o sin permisos para GitHub Models. "
+                        "Asegúrate de que el token tenga acceso a github.com/marketplace/models"
+                    ),
+                )
             else:
-                print(f"[AI Error {e.status_code}] {e}")
-                raise HTTPException(status_code=e.status_code, detail=str(e))
+                # 400 u otro error de cliente: incluir el body real en el detail
+                raise HTTPException(
+                    status_code=e.status_code,
+                    detail=f"Error API ({model}) [{e.status_code}]: {e.message} — {body}",
+                )
         except AuthenticationError as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="GITHUB_TOKEN inválido o expirado. Genera un nuevo token en github.com/settings/tokens",
             )
         except Exception as e:
-            print(f"[AI UnknownError] {type(e).__name__}: {e}")
+            log.info(f"[AI UnknownError] {type(e).__name__}: {e}")
             traceback.print_exc()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -629,28 +647,28 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
     for i, (nombre_parte, prompt) in enumerate(partes):
         if i > 0:
             # Pequeña pausa entre llamadas para respetar el RPM
-            print(f"[Generador] Esperando 5 s antes de parte {i + 1}/{len(partes)}...")
+            log.info(f"[Generador] Esperando 5 s antes de parte {i + 1}/{len(partes)}...")
             time.sleep(5)
 
         archivos_parte: list = []
         for modelo in [MODEL_MAIN, MODEL_FALLBACK]:
             try:
-                print(f"[Generador] Parte '{nombre_parte}' con {modelo}...")
+                log.info(f"[Generador] Parte '{nombre_parte}' con {modelo}...")
                 texto = _call_ai(client, prompt, model=modelo, max_tokens=4096)
                 data  = json.loads(texto)
                 archivos_parte = data.get("files") or []
                 if archivos_parte:
-                    print(f"[Generador] ✓ Parte '{nombre_parte}' — {len(archivos_parte)} archivos.")
+                    log.info(f"[Generador] ✓ Parte '{nombre_parte}' — {len(archivos_parte)} archivos.")
                     break
                 else:
-                    print(f"[Generador] {modelo} devolvió JSON vacío en '{nombre_parte}', probando fallback...")
+                    log.info(f"[Generador] {modelo} devolvió JSON vacío en '{nombre_parte}', probando fallback...")
             except HTTPException as e:
-                print(f"[Generador] {modelo} falló en '{nombre_parte}' ({e.status_code}): {e.detail}")
+                log.info(f"[Generador] {modelo} falló en '{nombre_parte}' ({e.status_code}): {e.detail}")
                 if e.status_code in (429, 503):
                     continue   # intenta el siguiente modelo
                 raise
             except json.JSONDecodeError as exc:
-                print(f"[Generador] JSON inválido de {modelo}: {exc}")
+                log.info(f"[Generador] JSON inválido de {modelo}: {exc}")
                 continue
 
         if not archivos_parte:
@@ -670,7 +688,7 @@ def generar_codigo(db: Session, proyecto_id: int) -> dict:
             detail="No se generó ningún archivo. Intenta de nuevo.",
         )
 
-    print(f"[Generador] ✓ Generación completa — {len(todos_archivos)} archivos en total.")
+    log.info(f"[Generador] ✓ Generación completa — {len(todos_archivos)} archivos en total.")
     return _armar_resultado(todos_archivos)
 
 
