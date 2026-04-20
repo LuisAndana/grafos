@@ -30,10 +30,14 @@ from app.models.negociacion import Negociacion
 from app.models.srs_documento import SrsDocumento
 from app.models.artefacto import Artefacto
 
-# gemini-2.0-flash: 1500 req/día gratis (vs solo 20 de gemini-2.5-flash)
-MODEL = "models/gemini-2.0-flash"
-# gemini-1.5-flash ya no está disponible en v1beta → usar gemini-2.0-flash-lite
-FALLBACK_MODELS = ["models/gemini-2.0-flash-lite", "models/gemini-2.5-flash"]
+# Modelos disponibles en el free tier de Gemini API (abril 2025)
+MODEL_FLASH25      = "models/gemini-2.5-flash"      # 10 RPM · 20 RPD/día  · 65 536 tokens/respuesta
+MODEL_FLASH20      = "models/gemini-2.0-flash"       # 15 RPM · 1 500 RPD/día ·  8 192 tokens/respuesta
+MODEL_FLASH20_LITE = "models/gemini-2.0-flash-lite"  # 30 RPM · 1 500 RPD/día ·  8 192 tokens/respuesta
+
+# Alias usados por _call_gemini (compatibilidad con generar_diagrama)
+MODEL           = MODEL_FLASH25
+FALLBACK_MODELS = [MODEL_FLASH20, MODEL_FLASH20_LITE]
 
 
 def _es_error_cuota(e: Exception) -> bool:
@@ -58,104 +62,129 @@ def _extraer_retry_delay(e: Exception) -> float:
     return 0.0
 
 
+def _call_gemini_modelo(
+    client: genai.Client,
+    model: str,
+    contents: str,
+    config: types.GenerateContentConfig,
+    max_503_retries: int = 2,
+):
+    """
+    Llama a UN modelo Gemini específico con reintentos robustos.
+
+    - 503 UNAVAILABLE   → hasta max_503_retries intentos con 90 s y 180 s de espera.
+                          El servidor tarda varios minutos en recuperarse; esperas cortas no sirven.
+    - 429 RPM (≤90 s)   → espera 120 s y reintenta; si falla de nuevo espera 240 s más.
+    - 429 cuota diaria  → lanza HTTPException(429) inmediatamente.
+    - 404 NOT_FOUND     → lanza HTTPException(404).
+    - Otros ClientError → lanza HTTPException(400).
+    """
+    for attempt in range(1, max_503_retries + 1):
+        try:
+            print(f"[Gemini] {model} — intento {attempt}/{max_503_retries}...")
+            return client.models.generate_content(
+                model=model, contents=contents, config=config,
+            )
+        except genai_errors.ServerError as e:
+            if attempt < max_503_retries:
+                wait = 90 * attempt   # 90 s → 180 s  (el servidor necesita tiempo real)
+                print(f"[Gemini 503] {model} saturado, reintentando en {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"[Gemini 503] {model} agotó {max_503_retries} reintentos.")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Modelo {model} no disponible (503) tras {max_503_retries} intentos.",
+                )
+        except genai_errors.ClientError as e:
+            if _es_error_cuota(e):
+                delay = _extraer_retry_delay(e)
+                if 0 < delay <= 90:
+                    # ── Reintento 1: esperar la ventana completa ──────────────
+                    wait1 = max(delay + 10, 120)   # mínimo 2 minutos
+                    print(f"[Gemini RPM] {model} límite/min, esperando {wait1:.0f}s (intento 1/2)...")
+                    time.sleep(wait1)
+                    try:
+                        print(f"[Gemini] {model} reintento 1 post-RPM...")
+                        return client.models.generate_content(
+                            model=model, contents=contents, config=config,
+                        )
+                    except genai_errors.ClientError as r1:
+                        if not _es_error_cuota(r1):
+                            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(r1))
+                        # ── Reintento 2: ventana de 4 minutos adicionales ─────
+                        wait2 = 240
+                        print(f"[Gemini RPM] {model} sigue con límite, esperando {wait2}s adicionales (intento 2/2)...")
+                        time.sleep(wait2)
+                        try:
+                            print(f"[Gemini] {model} reintento 2 post-RPM...")
+                            return client.models.generate_content(
+                                model=model, contents=contents, config=config,
+                            )
+                        except genai_errors.ClientError as r2:
+                            if _es_error_cuota(r2):
+                                print(f"[Gemini RPM] {model} agotó 2 reintentos RPM ({wait1+wait2:.0f}s total).")
+                                raise HTTPException(429, detail=f"RPM persistente: {model}.")
+                            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(r2))
+                        except Exception as r2:
+                            raise HTTPException(503, detail=str(r2))
+                    except Exception as r1:
+                        raise HTTPException(503, detail=str(r1))
+                else:
+                    # Sin delay o delay largo → cuota diaria agotada
+                    print(f"[Gemini 429] Cuota diaria agotada en {model}.")
+                    raise HTTPException(429, detail=f"Cuota diaria agotada: {model}.")
+            elif "404" in str(e) or "NOT_FOUND" in str(e):
+                print(f"[Gemini 404] {model} no disponible en esta API.")
+                raise HTTPException(404, detail=f"Modelo no encontrado: {model}.")
+            else:
+                print(f"[Gemini ClientError] {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Error al llamar a Gemini ({model}): {e}",
+                )
+        except Exception as e:
+            print(f"[Gemini UnknownError] {type(e).__name__}: {e}")
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error inesperado: {type(e).__name__}: {e}",
+            )
+    raise HTTPException(status_code=503, detail=f"No se pudo contactar a {model}.")
+
+
 def _call_gemini(
     client: genai.Client,
     contents: str,
     config: types.GenerateContentConfig,
-    max_retries: int = 2,
+    max_retries: int = 2,   # mantenido por compatibilidad, ya no se usa directamente
 ):
     """
-    Llama a Gemini con reintentos inteligentes y fallback a modelos alternativos.
+    Prueba los modelos en secuencia hasta obtener respuesta.
+    Usado principalmente por generar_diagrama.
 
-    - 503 UNAVAILABLE        → reintenta el mismo modelo (10s entre intentos).
-    - 429 con retryDelay≤90s → límite por minuto (RPM): espera el delay sugerido
-                               y reintenta el mismo modelo una vez más.
-    - 429 sin delay o >90s   → cuota diaria agotada: pasa al siguiente modelo.
-    - 404 NOT_FOUND          → modelo no disponible: pasa al siguiente modelo.
-    - Otros ClientError      → falla inmediatamente (API key inválida, etc.).
+    - 429 / 503 / 404 en un modelo → intenta el siguiente.
+    - 400 / 500              → falla de inmediato (error de cliente/servidor real).
     """
-    models_to_try = [MODEL] + FALLBACK_MODELS
     last_error = None
+    for model in [MODEL] + FALLBACK_MODELS:
+        try:
+            return _call_gemini_modelo(client, model, contents, config)
+        except HTTPException as e:
+            last_error = e
+            if e.status_code in (429, 503, 404):
+                print(f"[Gemini] {model} → {e.status_code}, probando siguiente modelo...")
+                continue
+            raise   # 400, 500: error real, no vale la pena probar otro modelo
+        except Exception as e:
+            raise HTTPException(500, detail=str(e))
 
-    for model in models_to_try:
-        for attempt in range(1, max_retries + 1):
-            try:
-                print(f"[Gemini] Usando {model} (intento {attempt}/{max_retries})...")
-                return client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=config,
-                )
-            except genai_errors.ServerError as e:
-                # 503 temporal: reintenta el mismo modelo con más tiempo
-                last_error = e
-                if attempt < max_retries:
-                    wait = 20 * attempt  # 20s, 40s
-                    print(f"[Gemini 503] {model} saturado, reintentando en {wait}s...")
-                    time.sleep(wait)
-                else:
-                    print(f"[Gemini 503] {model} agotó reintentos, probando siguiente modelo...")
-            except genai_errors.ClientError as e:
-                if _es_error_cuota(e):
-                    last_error = e
-                    delay = _extraer_retry_delay(e)
-                    if 0 < delay <= 90:
-                        # RPM: la ventana por minuto no resetea con solo esperar el delay sugerido
-                        # si hubo actividad reciente — esperar la ventana completa de 65s mínimo
-                        wait_rpm = max(delay + 5, 65)
-                        print(f"[Gemini RPM] {model} límite/min, esperando {wait_rpm:.0f}s (ventana completa)...")
-                        time.sleep(wait_rpm)
-                        try:
-                            print(f"[Gemini] Reintentando {model} tras espera RPM...")
-                            return client.models.generate_content(
-                                model=model, contents=contents, config=config,
-                            )
-                        except genai_errors.ClientError as retry_e:
-                            if _es_error_cuota(retry_e):
-                                print(f"[Gemini RPM] {model} sigue con límite, probando siguiente modelo...")
-                            else:
-                                raise HTTPException(
-                                    status_code=status.HTTP_400_BAD_REQUEST,
-                                    detail=f"Error al llamar a la API de Gemini: {retry_e}",
-                                )
-                        except Exception as retry_e:
-                            print(f"[Gemini retry error] {type(retry_e).__name__}: {retry_e}")
-                    else:
-                        # Cuota diaria agotada → siguiente modelo
-                        print(f"[Gemini 429] Cuota diaria agotada en {model}, probando siguiente...")
-                    break
-                elif "404" in str(e) or "NOT_FOUND" in str(e):
-                    # Modelo no disponible en esta API → siguiente modelo
-                    last_error = e
-                    print(f"[Gemini 404] {model} no disponible, probando siguiente modelo...")
-                    break
-                else:
-                    # Error real del cliente (API key inválida, request mal formado…)
-                    print(f"[Gemini ClientError] {e}")
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Error al llamar a la API de Gemini: {e}",
-                    )
-            except Exception as e:
-                print(f"[Gemini UnknownError] {type(e).__name__}: {e}")
-                traceback.print_exc()
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Error inesperado llamando a Gemini: {type(e).__name__}: {e}",
-                )
-
-    # Todos los modelos agotados
-    if last_error and _es_error_cuota(last_error):
-        detail = (
-            "Has alcanzado el límite de solicitudes gratuitas de Gemini. "
-            "Espera unos minutos (límite/min) o intenta mañana (límite diario). "
-            "Revisa tu cuota en https://ai.dev/rate-limit"
-        )
-    else:
-        detail = (
-            "Los modelos de IA no están disponibles en este momento. "
-            f"Intenta de nuevo en unos minutos. ({last_error})"
-        )
+    # Todos los modelos fallaron
+    detail = (
+        "Todos los modelos de IA están con límites de uso. "
+        "Espera 5 minutos (límite/min) o intenta mañana (límite diario). "
+        "Detalle: " + (last_error.detail if last_error else "desconocido")
+    )
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail=detail,
@@ -552,6 +581,52 @@ section="frontend" para todos:
  9. tsconfig.app.json                            — extends "./tsconfig.json", include ["src/**/*.ts"]"""
 
 
+def _prompt_completo(contexto: str) -> str:
+    """
+    Prompt unificado para generar los 25 archivos en UNA SOLA llamada.
+    Requiere un modelo con >= 65 K tokens de salida (gemini-2.5-flash).
+    """
+    return f"""Eres un arquitecto de software senior. Especificación del proyecto:
+
+{contexto}
+
+{_FORMATO_COMUN}
+
+Genera los siguientes 25 ARCHIVOS COMPLETOS para una aplicación web full-stack:
+
+BACKEND (section="backend") — 8 archivos:
+ 1. main.py         — FastAPI con CORSMiddleware(allow_origins=["*"]), include_router, uvicorn puerto 8000
+ 2. database.py     — SQLAlchemy engine, SessionLocal, Base, función get_db()
+ 3. models.py       — modelos SQLAlchemy (usa LONGTEXT para campos JSON/texto largo, nunca TEXT simple)
+ 4. schemas.py      — schemas Pydantic v2 con Optional para campos de update
+ 5. crud.py         — CRUD completo: get_by_id, list_all, create, update, delete
+ 6. router.py       — APIRouter con endpoints GET/POST/PUT/DELETE para cada entidad
+ 7. requirements.txt — una dependencia por línea: fastapi, uvicorn[standard], sqlalchemy, pymysql, python-dotenv, pydantic
+ 8. .env            — DATABASE_URL=mysql+pymysql://root:Admin1234!@localhost/<nombre_bd_del_proyecto>
+
+DATABASE (section="database") — 1 archivo:
+ 9. schema.sql      — SOLO: DROP TABLE IF EXISTS + CREATE TABLE (LONGTEXT para JSON) + INSERT de ejemplo
+                     NO incluir CREATE DATABASE ni USE <db>
+
+FRONTEND Angular 18 standalone (section="frontend") — 16 archivos:
+10. src/app/models/interfaces.ts               — interfaces TypeScript de todas las entidades
+11. src/app/services/api.service.ts            — @Injectable HttpClient, métodos CRUD para cada entidad
+12. src/app/app.component.ts                   — standalone root, selector 'app-root', <router-outlet>
+13. src/app/app.routes.ts                      — Routes[], ruta '' carga MainComponent con loadComponent
+14. src/app/app.config.ts                      — ApplicationConfig: provideRouter, provideHttpClient, provideZoneChangeDetection
+15. src/environments/environment.ts            — export const environment = {{ apiUrl: 'http://localhost:8000' }}
+16. src/main.ts                                — bootstrapApplication(AppComponent, appConfig)
+17. src/app/components/main/main.component.ts  — standalone, lógica CRUD completa (listar, crear, editar, eliminar)
+18. src/app/components/main/main.component.html — template: formulario + tabla con botones editar/eliminar
+19. src/app/components/main/main.component.css  — estilos modernos y responsivos
+20. src/index.html                             — HTML raíz: charset utf-8, <base href="/">, <app-root>
+21. src/styles.css                             — estilos globales (reset CSS, variables de color)
+22. package.json                               — name: "frontend", scripts start/build, @angular/core ^18.0.0
+23. angular.json                               — version 1, sourceRoot "src", index "src/index.html", browser "src/main.ts", tsConfig "tsconfig.app.json"
+24. tsconfig.json                              — target ES2022, module ES2022, strict false
+25. tsconfig.app.json                          — extends "./tsconfig.json", include ["src/**/*.ts"]"""
+
+
 _SCHEMA_ARCHIVOS = {
     "type": "object",
     "required": ["files"],
@@ -574,76 +649,120 @@ _SCHEMA_ARCHIVOS = {
 
 # ── Generación de código ──────────────────────────────────────────────────────
 
-def generar_codigo(db: Session, proyecto_id: int) -> dict:
-    """
-    Genera la aplicación completa en 3 llamadas enfocadas a Gemini:
-      1. Backend (FastAPI) + Base de datos (SQL)   →  9 archivos
-      2. Frontend core (servicios, rutas, config)   →  7 archivos
-      3. Frontend componentes + Angular config       →  9 archivos
-
-    Usar 3 llamadas pequeñas en lugar de 1 gigante reduce el consumo de tokens
-    por solicitud y aprovecha el límite de 1500 req/día de gemini-2.0-flash,
-    frente a solo 20 req/día de gemini-2.5-flash.
-    """
-    datos = _recopilar_datos(db, proyecto_id)
-    contexto = _construir_contexto(datos)
-    client = _get_client()
-
-    config = types.GenerateContentConfig(
-        max_output_tokens=8192,   # límite de gemini-2.0-flash; suficiente por parte
-        temperature=0.3,
-        response_mime_type="application/json",
-        response_schema=_SCHEMA_ARCHIVOS,
-    )
-
-    partes = [
-        ("backend y base de datos",  _prompt_backend_db(contexto)),
-        ("frontend core",            _prompt_frontend_core(contexto)),
-        ("frontend componentes",     _prompt_frontend_componentes(contexto)),
-    ]
-
-    todos_archivos = []
-    for i, (nombre_parte, prompt) in enumerate(partes):
-        if i > 0:
-            # Pausa entre llamadas para no golpear el límite por minuto (RPM).
-            # gemini-2.0-flash tiene ~10-15 RPM en free tier; 25s entre llamadas = ~2.4 RPM
-            print(f"[Gemini] Esperando 25s antes de parte {i+1}/{len(partes)} (control RPM)...")
-            time.sleep(25)
-        respuesta = _call_gemini(client, prompt, config=config)
-        texto = respuesta.text or ""
-        try:
-            data = json.loads(texto)
-        except json.JSONDecodeError as e:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"JSON inválido en parte '{nombre_parte}': {e}. Inicio: {texto[:200]}",
-            )
-        todos_archivos.extend(data.get("files") or [])
-
-    if not todos_archivos:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Gemini no devolvió archivos en ninguna de las partes.",
-        )
-
-    # ── Reconstruir bloques con marcadores @@FILE: para compatibilidad ────────
-    bloques = {"frontend": [], "backend": [], "database": []}
+def _armar_resultado(todos_archivos: list) -> dict:
+    """Convierte la lista plana de archivos JSON en el resultado {frontend, backend, database}."""
+    bloques: dict = {"frontend": [], "backend": [], "database": []}
     for arch in todos_archivos:
         seccion = (arch.get("section") or "").lower()
         ruta    = (arch.get("path") or "").strip()
         if seccion not in bloques or not ruta:
             continue
-
-        lines = arch.get("lines")
+        lines    = arch.get("lines")
         contenido = "\n".join(lines) if isinstance(lines, list) else (arch.get("content") or "")
         contenido = _fix_contenido(ruta, contenido)
         bloques[seccion].append(f"@@FILE: {ruta}@@\n{contenido}")
-
     return {
         "frontend": "\n\n".join(bloques["frontend"]),
         "backend":  "\n\n".join(bloques["backend"]),
         "database": "\n\n".join(bloques["database"]),
     }
+
+
+def generar_codigo(db: Session, proyecto_id: int) -> dict:
+    """
+    Genera la aplicación completa con dos estrategias, de más eficiente a más tolerante:
+
+    Estrategia 1 — gemini-2.5-flash, llamada ÚNICA (65 536 tokens de salida):
+      • Solo consume 1 RPD en lugar de 3 → menos presión sobre la cuota diaria.
+      • 10 RPM es suficiente para uso interactivo normal.
+      • Si falla (503 persistente, RPM o cuota diaria) → pasa a Estrategia 2.
+
+    Estrategia 2 — gemini-2.0-flash / gemini-2.0-flash-lite, 3 llamadas de 8 192 tokens:
+      • 1 500 RPD disponibles → útil cuando gemini-2.5-flash no responde.
+      • Espera 30 s entre partes para respetar el RPM.
+    """
+    datos    = _recopilar_datos(db, proyecto_id)
+    contexto = _construir_contexto(datos)
+    client   = _get_client()
+
+    # ── Estrategia 1: llamada única con gemini-2.5-flash (65 K tokens) ──────
+    print("[Generador] Estrategia 1 — gemini-2.5-flash, llamada única (65 536 tokens)...")
+    config_25 = types.GenerateContentConfig(
+        max_output_tokens=65536,
+        temperature=0.3,
+        response_mime_type="application/json",
+        response_schema=_SCHEMA_ARCHIVOS,
+    )
+    todos_archivos: list = []
+    try:
+        resp = _call_gemini_modelo(client, MODEL_FLASH25, _prompt_completo(contexto), config_25)
+        todos_archivos = (json.loads(resp.text or "{}")).get("files") or []
+    except HTTPException as e:
+        print(f"[Generador] Estrategia 1 falló ({e.status_code}): {e.detail}")
+    except Exception as e:
+        print(f"[Generador] Estrategia 1 error inesperado: {e}")
+
+    if todos_archivos:
+        print(f"[Generador] Estrategia 1 exitosa — {len(todos_archivos)} archivos generados.")
+        return _armar_resultado(todos_archivos)
+
+    # ── Cooldown antes de Estrategia 2 ──────────────────────────────────────
+    # Las peticiones fallidas a gemini-2.5-flash pueden haber saturado los
+    # límites del proyecto; esperar 60 s da tiempo a que los contadores RPM
+    # de los modelos 2.0-flash se limpien completamente.
+    print("[Generador] Esperando 60 s de cooldown antes de Estrategia 2...")
+    time.sleep(60)
+
+    # ── Estrategia 2: 3 partes con gemini-2.0-flash → gemini-2.0-flash-lite ─
+    print("[Generador] Estrategia 2 — modo 3 partes (8 192 tokens cada una)...")
+    config_20 = types.GenerateContentConfig(
+        max_output_tokens=8192,
+        temperature=0.3,
+        response_mime_type="application/json",
+        response_schema=_SCHEMA_ARCHIVOS,
+    )
+    partes = [
+        ("backend y base de datos", _prompt_backend_db(contexto)),
+        ("frontend core",           _prompt_frontend_core(contexto)),
+        ("frontend componentes",    _prompt_frontend_componentes(contexto)),
+    ]
+
+    for i, (nombre_parte, prompt) in enumerate(partes):
+        if i > 0:
+            print(f"[Generador] Esperando 30 s antes de parte {i + 1}/{len(partes)}...")
+            time.sleep(30)
+
+        archivos_parte: list = []
+        for modelo in [MODEL_FLASH20, MODEL_FLASH20_LITE]:
+            try:
+                resp = _call_gemini_modelo(client, modelo, prompt, config_20)
+                archivos_parte = (json.loads(resp.text or "{}")).get("files") or []
+                if archivos_parte:
+                    print(f"[Generador] Parte '{nombre_parte}' generada con {modelo}.")
+                    break
+            except HTTPException as e:
+                print(f"[Generador] {modelo} falló en parte '{nombre_parte}': {e.detail}")
+                continue
+
+        if not archivos_parte:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"No se pudo generar la parte '{nombre_parte}'. "
+                    "Todos los modelos de IA están con límites de uso. "
+                    "Espera al menos 5 minutos e intenta de nuevo."
+                ),
+            )
+        todos_archivos.extend(archivos_parte)
+
+    if not todos_archivos:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No se generó ningún archivo. Intenta de nuevo en unos minutos.",
+        )
+
+    print(f"[Generador] Estrategia 2 exitosa — {len(todos_archivos)} archivos generados.")
+    return _armar_resultado(todos_archivos)
 
 
 # ── Generación de diagramas Mermaid ──────────────────────────────────────────
