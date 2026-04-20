@@ -9,17 +9,17 @@ from openai import OpenAI, RateLimitError, APIStatusError, AuthenticationError
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
-# ── Logging — usa handler propio para que funcione con uvicorn ──────────────
-# logging.basicConfig() es un no-op si uvicorn ya configuró el root logger,
-# así que añadimos nuestro propio StreamHandler directamente.
+# ── Logging — fuerza salida a stdout (mismo stream que SQLAlchemy/uvicorn) ──
+import sys as _sys
+
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 if not log.handlers:
-    _sh = logging.StreamHandler()
+    _sh = logging.StreamHandler(_sys.stdout)
     _sh.setLevel(logging.DEBUG)
     _sh.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
     log.addHandler(_sh)
-    log.propagate = False   # evitar duplicados si root también tiene handler
+log.propagate = False   # evitar duplicados si root también tiene handler
 
 load_dotenv(override=True)
 
@@ -104,6 +104,8 @@ def _call_ai(
                 body = e.response.text[:400]
             except Exception:
                 body = str(e)
+            # print directo para garantizar visibilidad independientemente del stream
+            print(f"\n>>> [AI Error {e.status_code}] model={model} msg={e.message!r} body={body!r}\n", flush=True)
             log.error(f"[AI Error {e.status_code}] {model}: {e.message} | body: {body}")
             if e.status_code >= 500:
                 if attempt < 3:
