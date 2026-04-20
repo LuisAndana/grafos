@@ -10,6 +10,7 @@ class SrsDocumento(Base):
     id_srs = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
     proyecto_id = Column(BigInteger, ForeignKey("proyectos.id_proyecto"), nullable=False)
     nombre_documento = Column(String(255), nullable=False)
+    generado_por = Column(BigInteger, nullable=True, default=None)  # FK optional
     introduccion = Column(Text, nullable=True)
 
     # Stakeholders (almacenado como JSON)
