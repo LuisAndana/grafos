@@ -1,6 +1,7 @@
 import re
 import os
 import json
+import time
 import traceback
 from dotenv import load_dotenv
 from google import genai
@@ -30,6 +31,87 @@ from app.models.srs_documento import SrsDocumento
 from app.models.artefacto import Artefacto
 
 MODEL = "models/gemini-2.5-flash"
+FALLBACK_MODELS = ["models/gemini-2.0-flash", "models/gemini-1.5-flash"]
+
+
+def _es_error_cuota(e: Exception) -> bool:
+    """Devuelve True si el error es 429 RESOURCE_EXHAUSTED (cuota agotada del modelo)."""
+    msg = str(e)
+    return "429" in msg or "RESOURCE_EXHAUSTED" in msg
+
+
+def _call_gemini(
+    client: genai.Client,
+    contents: str,
+    config: types.GenerateContentConfig,
+    max_retries: int = 2,
+):
+    """
+    Llama a Gemini con reintentos automáticos y fallback a modelos alternativos.
+
+    - 503 UNAVAILABLE  → reintenta el mismo modelo (espera 10s entre intentos),
+                         luego prueba el siguiente modelo de la lista.
+    - 429 RESOURCE_EXHAUSTED → cuota diaria agotada: pasa directamente al
+                               siguiente modelo sin reintentar el mismo.
+    - Otros ClientError (401, 400…) → falla inmediatamente.
+    """
+    models_to_try = [MODEL] + FALLBACK_MODELS
+    last_error = None
+
+    for model in models_to_try:
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"[Gemini] Usando {model} (intento {attempt}/{max_retries})...")
+                return client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+            except genai_errors.ServerError as e:
+                # 503 temporal: reintenta en el mismo modelo
+                last_error = e
+                if attempt < max_retries:
+                    wait = 10 * attempt  # 10s, 20s
+                    print(f"[Gemini 503] {model} saturado, reintentando en {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"[Gemini 503] {model} agotó reintentos, probando modelo alternativo...")
+            except genai_errors.ClientError as e:
+                if _es_error_cuota(e):
+                    # 429: cuota diaria agotada en este modelo → siguiente modelo
+                    last_error = e
+                    print(f"[Gemini 429] Cuota agotada en {model}, probando modelo alternativo...")
+                    break  # sale del loop de reintentos, el for exterior prueba el siguiente modelo
+                else:
+                    # Errores reales del cliente (API key inválida, request mal formado…)
+                    print(f"[Gemini ClientError] {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Error al llamar a la API de Gemini: {e}",
+                    )
+            except Exception as e:
+                print(f"[Gemini UnknownError] {type(e).__name__}: {e}")
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error inesperado llamando a Gemini: {type(e).__name__}: {e}",
+                )
+
+    # Todos los modelos agotados — mensaje amigable según el tipo de error
+    if last_error and _es_error_cuota(last_error):
+        detail = (
+            "Has alcanzado el límite diario de solicitudes gratuitas de Gemini. "
+            "Intenta de nuevo mañana o revisa tu cuota en https://ai.dev/rate-limit"
+        )
+    else:
+        detail = (
+            "Los modelos de IA están temporalmente no disponibles. "
+            f"Por favor, intenta de nuevo en unos minutos. ({last_error})"
+        )
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=detail,
+    )
 
 # ── Lectura de artefactos de texto ──────────────────────────────────────────
 _EXTENSIONES_TEXTO = {
@@ -441,38 +523,16 @@ REGLAS:
 - Cada método/función debe estar implementado completamente
 - Prioriza completitud sobre comentarios"""
 
-    try:
-        respuesta = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=65536,
-                temperature=0.3,
-                response_mime_type="application/json",
-                response_schema=response_schema,
-            ),
-        )
-    except genai_errors.ServerError as e:
-        print(f"[Gemini ServerError] {type(e).__name__}: {e}")
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"El modelo de IA está saturado en este momento. Intenta de nuevo en unos segundos. ({e})",
-        )
-    except genai_errors.ClientError as e:
-        print(f"[Gemini ClientError] {type(e).__name__}: {e}")
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error al llamar a la API de Gemini: {e}",
-        )
-    except Exception as e:
-        print(f"[Gemini UnknownError] {type(e).__name__}: {e}")
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error inesperado llamando a Gemini: {type(e).__name__}: {e}",
-        )
+    respuesta = _call_gemini(
+        client,
+        prompt,
+        config=types.GenerateContentConfig(
+            max_output_tokens=65536,
+            temperature=0.3,
+            response_mime_type="application/json",
+            response_schema=response_schema,
+        ),
+    )
 
     texto = respuesta.text or ""
 
@@ -559,25 +619,14 @@ REGLAS ESTRICTAS:
 3. Usa nombres en español basados en la especificación del proyecto.
 4. El diagrama debe ser coherente con los datos del proyecto proporcionados."""
 
-    try:
-        respuesta = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=8192,
-                temperature=0.4,
-            ),
-        )
-    except genai_errors.ServerError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"El modelo de IA está saturado en este momento. Intenta de nuevo en unos segundos. ({e})",
-        )
-    except genai_errors.ClientError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error al llamar a la API de Gemini: {e}",
-        )
+    respuesta = _call_gemini(
+        client,
+        prompt,
+        config=types.GenerateContentConfig(
+            max_output_tokens=8192,
+            temperature=0.4,
+        ),
+    )
 
     codigo_mermaid = respuesta.text
 
