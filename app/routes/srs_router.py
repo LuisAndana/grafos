@@ -143,6 +143,52 @@ async def delete_srs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/auto-generar/{proyecto_id}")
+async def auto_generar_srs(
+        proyecto_id: int,
+        db: Session = Depends(get_db),
+):
+    """
+    Genera (o actualiza) automáticamente un SRS completo
+    a partir de TODOS los módulos del proyecto:
+    Stakeholders, Elicitación, Requerimientos, RNF,
+    Casos de Uso, Restricciones, Negociación, Validación y Artefactos.
+    """
+    try:
+        srs = SrsService.auto_generar_srs(db, proyecto_id)
+        if not srs:
+            raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+        return {
+            "success": True,
+            "data": {
+                "id_srs": srs.id_srs,
+                "proyecto_id": srs.proyecto_id,
+                "nombre_documento": srs.nombre_documento,
+                "introduccion": srs.introduccion,
+                "stakeholders": srs.stakeholders,
+                "usuarios": srs.usuarios,
+                "requerimientos_funcionales": srs.requerimientos_funcionales,
+                "requerimientos_no_funcionales": srs.requerimientos_no_funcionales,
+                "casos_uso": srs.casos_uso,
+                "restricciones": srs.restricciones,
+                "elicitacion": srs.elicitacion,
+                "negociaciones": srs.negociaciones,
+                "validacion_info": srs.validacion_info,
+                "artefactos_info": srs.artefactos_info,
+                "estado": srs.estado,
+                "version": srs.version,
+                "created_at": srs.created_at,
+                "updated_at": srs.updated_at,
+            },
+            "message": "SRS auto-generado exitosamente desde todos los módulos del proyecto",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/generar-pdf/{srs_id}")
 async def generate_srs_pdf(
         srs_id: int,
