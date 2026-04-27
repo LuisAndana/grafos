@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Path, status
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/diagramas", tags=["Diagramas"])
 
 @router.get("/proyecto/{proyecto_id}", response_model=DiagramaListResponse)
 def listar_diagramas(
-    proyecto_id: int = Query(..., description="ID del proyecto"),
+    proyecto_id: int = Path(..., description="ID del proyecto", gt=0),
     tipo: Optional[str] = Query(None, description="Filtrar por tipo de diagrama"),
     db: Session = Depends(get_db),
 ):
