@@ -27,6 +27,10 @@ from app.models.tipo_usuario_proyecto import TipoUsuarioProyecto
 from app.models.caso_uso import CasoUso
 from app.models.restriccion import Restriccion
 from app.models.artefacto import Artefacto
+<<<<<<< HEAD
+=======
+from app.models.diagrama import Diagrama
+>>>>>>> 19fca05b3dab164eb585e0015991ce43c835db50
 
 # ════════════════════════════════════════════════════════════════════════════
 # ROUTERS
@@ -47,6 +51,10 @@ from app.routes.artefacto_router import router as artefacto_router
 from app.routes.validacion_router import router as validacion_router
 from app.routes.historial_router import router as historial_router
 from app.routes.generador_router import router as generador_router
+<<<<<<< HEAD
+=======
+from app.routes.diagrama_router import router as diagrama_router
+>>>>>>> 19fca05b3dab164eb585e0015991ce43c835db50
 
 settings = get_settings()
 
@@ -80,6 +88,10 @@ app.include_router(artefacto_router)
 app.include_router(validacion_router)
 app.include_router(historial_router)
 app.include_router(generador_router)
+<<<<<<< HEAD
+=======
+app.include_router(diagrama_router)
+>>>>>>> 19fca05b3dab164eb585e0015991ce43c835db50
 
 
 def custom_openapi():
